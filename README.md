@@ -43,3 +43,11 @@ DexProtector 的 native 检测在 `attachBaseContext` 里同步执行（启动�
 ## 声明
 
 仅供安全研究与授权测试使用。
+
+## frida 17.x 备注（参考《Frida 17.6.2 魔改 rusda》本地文档）
+
+- frida 17 的 rusda（Rust 重写的 daemon）和 memfd 装载收敛让部分旧检测点失效
+- 源码级方案：协议字符串 hex-xor 运行时还原（`obfuscate.vala` decode_hex_xor +
+  `rpc.vala` get_rpc_str），`.rodata` 类型名等长反转，符号统一改名前缀
+- 17.6.2 的暴露面确实比 16.7.19 少（memfd 装载、Memory.patchCode 短暂开写权限、
+  注入链更轻量），本仓库的 rename.py 在两个版本上都适用

@@ -1,31 +1,22 @@
-
-
----
- lib/payload/exit-monitor.vala | 4 ++--
- 1 file changed, 2 insertions(+), 2 deletions(-)
-
 diff --git a/lib/payload/exit-monitor.vala b/lib/payload/exit-monitor.vala
-index c32670d5..7619344a 100644
+index b1f4fe7..1736fca 100644
 --- a/lib/payload/exit-monitor.vala
 +++ b/lib/payload/exit-monitor.vala
 @@ -32,7 +32,7 @@ namespace Frida {
  			unowned Gum.InvocationListener listener = this;
-
+ 
  #if WINDOWS
--			interceptor.attach (Gum.Module.find_export_by_name ("kernel32.dll", "ExitProcess"), listener);
-+			// interceptor.attach (Gum.Module.find_export_by_name ("kernel32.dll", "ExitProcess"), listener);
+-			interceptor.attach ((void *) Gum.Process.find_module_by_name ("kernel32.dll").find_export_by_name ("ExitProcess"),
++			// interceptor.attach ((void *) Gum.Process.find_module_by_name ("kernel32.dll").find_export_by_name ("ExitProcess"),
+ 				listener);
  #else
- 			unowned string libc = Gum.Process.query_libc_name ();
- 			const string[] apis = {
-@@ -41,7 +41,7 @@ namespace Frida {
+ 			var libc = Gum.Process.get_libc_module ();
+@@ -42,7 +42,7 @@ namespace Frida {
  				"abort",
  			};
  			foreach (var symbol in apis) {
--				interceptor.attach (Gum.Module.find_export_by_name (libc, symbol), listener);
-+				// interceptor.attach (Gum.Module.find_export_by_name (libc, symbol), listener);
+-				interceptor.attach ((void *) libc.find_export_by_name (symbol), listener);
++			// interceptor.attach ((void *) libc.find_export_by_name (symbol), listener);
  			}
  #endif
  		}
---
-2.34.1
-
