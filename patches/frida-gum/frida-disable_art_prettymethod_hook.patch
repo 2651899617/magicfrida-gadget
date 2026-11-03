@@ -1,0 +1,22 @@
+
+
+---
+ bindings/gumjs/generate-runtime.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/bindings/gumjs/generate-runtime.py b/bindings/gumjs/generate-runtime.py
+index 61feaf1b..da9f00df 100755
+--- a/bindings/gumjs/generate-runtime.py
++++ b/bindings/gumjs/generate-runtime.py
+@@ -62,6 +62,8 @@ def generate_runtime(backends, arch, endian, input_dir, gum_dir, capstone_incdir
+             ])
+             raise EnvironmentError(message)
+
++    js_path = output_dir / "node_modules" / "frida-java-bridge" / "lib" / "android.js"
++    subprocess.call(["sed", "-i", r"'/Interceptor.attach(prettyMethod.impl, artController.hooks.ArtMethod.prettyMethod);/,/Interceptor.flush();/{d}'", js_path])
+
+     runtime_reldir = Path("runtime")
+     runtime_srcdir = input_dir / runtime_reldir
+--
+2.34.1
+

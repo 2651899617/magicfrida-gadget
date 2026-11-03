@@ -1,0 +1,82 @@
+name: build-gadget
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      frida_version:
+        description: 'frida source tag to build'
+        required: false
+        default: '16.7.19'
+
+env:
+  FRIDA_VERSION: '16.7.19'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl wget xz-utils python3 patch
+
+      - name: Clone frida source
+        run: |
+          VER="${{ github.event.inputs.frida_version || env.FRIDA_VERSION }}"
+          echo "frida version: $VER"
+          git clone --depth 1 --branch "$VER" --recurse-submodules --jobs 8 \
+            https://github.com/frida/frida.git frida-src
+          cd frida-src
+          git rev-parse HEAD > ../frida-commit.txt
+          du -sh .
+
+      - name: Apply source patches
+        run: |
+          set -e
+          cd frida-src/subprojects/frida-core
+          for p in $GITHUB_WORKSPACE/patches/frida-core/*.patch; do
+            echo "== applying $(basename $p) =="
+            patch -p1 --fuzz=5 < "$p"
+          done
+          cd ../frida-gum
+          for p in $GITHUB_WORKSPACE/patches/frida-gum/*.patch; do
+            echo "== applying $(basename $p) =="
+            patch -p1 --fuzz=5 < "$p"
+          done
+          echo "all critical patches applied"
+
+      - name: Configure (android-arm64)
+        run: |
+          cd frida-src
+          ./configure --host=android-arm64 -- -Dfrida-gum:devkits=gumjs,gum
+
+      - name: Build gadget
+        run: |
+          cd frida-src
+          make -j$(nproc)
+
+      - name: Apply fingerprint renames
+        run: |
+          GADGET=$(find frida-src/build -path '*lib/gadget*' -name '*.so' | head -1)
+          if [ -z "$GADGET" ]; then
+            echo "gadget .so not found, dumping build tree"
+            find frida-src/build -name '*.so' | head -30
+            exit 1
+          fi
+          echo "gadget: $GADGET"
+          python3 patches/rename.py "$GADGET"
+          cp "$GADGET" magic-gadget-arm64.so
+          ls -l magic-gadget-arm64.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magic-gadget-arm64
+          path: magic-gadget-arm64.so
+          if-no-files-found: error

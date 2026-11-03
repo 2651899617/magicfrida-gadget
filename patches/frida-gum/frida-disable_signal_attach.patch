@@ -1,0 +1,31 @@
+
+
+---
+ gum/backend-posix/gumexceptor-posix.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/gum/backend-posix/gumexceptor-posix.c b/gum/backend-posix/gumexceptor-posix.c
+index 8710a995..0352c34c 100644
+--- a/gum/backend-posix/gumexceptor-posix.c
++++ b/gum/backend-posix/gumexceptor-posix.c
+@@ -201,7 +201,7 @@ gum_exceptor_backend_dispose (GObject * object)
+   {
+     self->disposed = TRUE;
+
+-    gum_exceptor_backend_detach (self);
++    // gum_exceptor_backend_detach (self);
+
+     g_object_unref (self->interceptor);
+     self->interceptor = NULL;
+@@ -222,7 +222,7 @@ gum_exceptor_backend_new (GumExceptionHandler handler,
+   backend->handler = handler;
+   backend->handler_data = user_data;
+
+-  gum_exceptor_backend_attach (backend);
++  // gum_exceptor_backend_attach (backend);
+
+   return backend;
+ }
+--
+2.34.1
+
