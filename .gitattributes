@@ -1,0 +1,9 @@
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.patch text eol=lf -whitespace
+*.json text eol=lf
+*.md text eol=lf
+tests/fixtures/** -text
+module/include/zygisk.hpp -text

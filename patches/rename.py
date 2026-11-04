@@ -1,66 +1,94 @@
 #!/usr/bin/env python3
-"""Post-build fingerprint renamer for the magic frida gadget.
-
-Same-length in-place byte replacements so the ELF stays valid:
-  - known marker strings -> random letters
-  - every remaining 'frida' substring -> 'kqzmv', EXCEPT the wire
-    protocol tokens 're.frida' / 're/frida' (client compatibility)
-
-Run:  python3 rename.py <gadget.so>
-"""
-import random
+"""Read-only ELF audit. The old whole-file binary renaming is disabled."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import struct
 import sys
 
+PROTECTED = (b're.frida', b're/frida', b'frida:rpc', b'frida_agent_main')
 
-def main():
-    path = sys.argv[1]
-    data = bytearray(open(path, 'rb').read())
-    assert data[:4] == b'\x7fELF', 'not an ELF'
 
-    random.seed(0x31415)
+def audit(data):
+    if len(data) < 64 or data[:7] != b'\x7fELF\x02\x01\x01':
+        raise ValueError('expected little-endian ELF64')
+    header = struct.unpack_from('<16sHHIQQQIHHHHHH', data)
+    _, kind, machine, version, _, phoff, shoff, _, ehsize, phsize, phnum, shsize, shnum, shstrings = header
+    if kind not in (2, 3) or machine != 183 or version != 1 or ehsize != 64:
+        raise ValueError('expected AArch64 executable/shared object')
+    if not phnum or phnum == 0xffff or phsize != 56:
+        raise ValueError('unsupported program table')
+    if not shnum or shsize != 64 or shstrings == 0xffff or shstrings >= shnum:
+        raise ValueError('unsupported section table')
 
-    def rnd(n):
-        return ''.join(random.choice('abcdefghijklmnopqrstuvwxyz')
-                       for _ in range(n)).encode()
+    def bounds(offset, size):
+        if offset < 0 or size < 0 or offset > len(data) or size > len(data) - offset:
+            raise ValueError('ELF range exceeds file boundary')
 
-    # exact-string renames (same length)
-    targets = [
-        b'FridaScriptEngine', b'GLib-GIO', b'GDBusProxy', b'GumScript',
-        b'gum-js-loop', b'gmain', b'gdbus', b'frida-gadget',
-        b'./lib/android', b'gadget', b'Binder:worker',
-        b'art::JavaVMExt::AddGlobalRef',
-        b'art::ClassLinker::VisitClassLoaders',
-        b'pool_spawner', b'pool_spoiler', b'frida-inject', b'libfrida-agent',
-    ]
-    for old in targets:
-        n = data.count(old)
-        if n:
-            new = rnd(len(old))
-            data = bytearray(data.replace(old, new))
-            print(f'  {old.decode("latin1"):36} -> {new.decode():20} x{n}')
+    bounds(phoff, phsize * phnum)
+    bounds(shoff, shsize * shnum)
+    loads = 0
+    for index in range(phnum):
+        p = struct.unpack_from('<IIQQQQQQ', data, phoff + index * phsize)
+        bounds(p[2], p[5])
+        if p[0] == 1:
+            loads += 1
+            if p[5] > p[6]:
+                raise ValueError('PT_LOAD filesz exceeds memsz')
+        if p[7] not in (0, 1) and p[7] & (p[7] - 1):
+            raise ValueError('invalid segment alignment')
+    if not loads:
+        raise ValueError('missing PT_LOAD')
+    sections = [struct.unpack_from('<IIQQQQIIQQ', data, shoff + i * shsize) for i in range(shnum)]
+    for section in sections:
+        if section[1] != 8:
+            bounds(section[4], section[5])
+        if section[6] >= shnum:
+            raise ValueError('invalid section link')
+    string_section = sections[shstrings]
+    if string_section[1] != 3:
+        raise ValueError('section names are not a string table')
+    strings = data[string_section[4]:string_section[4] + string_section[5]]
+    for section in sections:
+        name = section[0]
+        if name >= len(strings) or strings.find(b'\0', name) < 0:
+            raise ValueError('invalid section name')
+        if section[1] in (2, 11):
+            if section[9] != 24 or section[5] % 24 or sections[section[6]][1] != 3:
+                raise ValueError('invalid symbol table')
+            names = sections[section[6]]
+            table = data[names[4]:names[4] + names[5]]
+            for pos in range(section[4], section[4] + section[5], 24):
+                symbol_name = struct.unpack_from('<I', data, pos)[0]
+                if symbol_name >= len(table) or table.find(b'\0', symbol_name) < 0:
+                    raise ValueError('invalid symbol name')
+    return {
+        'architecture': 'aarch64', 'elf_type': kind, 'size': len(data),
+        'sha256': hashlib.sha256(data).hexdigest(), 'binary_modified': False,
+        'checks': 'ELF bounds only; no runtime, hash-table lookup or protocol handshake claim',
+        'protected_markers': {token.decode(): data.count(token) for token in PROTECTED},
+    }
 
-    # every remaining 'frida' substring -> 'kqzmv', keep protocol tokens
-    n = kept = 0
-    i = 0
-    while True:
-        i = data.find(b'frida', i)
-        if i < 0:
-            break
-        pre = bytes(data[i - 3:i])
-        if pre in (b're.', b're/'):
-            kept += 1
-            i += 5
-            continue
-        data[i:i + 5] = b'kqzmv'
-        n += 1
-        i += 5
-    print(f'  frida substrings -> kqzmv x{n} (protocol kept x{kept})')
 
-    assert data[:4] == b'\x7fELF' and len(data) == len(open(path, 'rb').read())
-    with open(path, 'wb') as f:
-        f.write(bytes(data))
-    print('OK, written', path, len(data))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('artifact', type=Path)
+    parser.add_argument('--report', type=Path)
+    args = parser.parse_args(argv)
+    try:
+        result = audit(args.artifact.read_bytes())
+        text = json.dumps(result, indent=2) + '\n'
+        if args.report:
+            if args.report.resolve() == args.artifact.resolve():
+                raise ValueError('report cannot overwrite artifact')
+            args.report.write_text(text, encoding='utf-8')
+        print(text, end='')
+    except (OSError, ValueError, struct.error) as error:
+        print('FATAL: ' + str(error), file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

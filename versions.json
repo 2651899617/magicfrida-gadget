@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "checked_at": "2026-11-04",
+  "architecture": "android-arm64",
+  "versions": [
+    {
+      "version": "16.7.19",
+      "release_status": "latest-16-tag-verified",
+      "commit": "3325d05539d7c940a1460e66a06d673a95f5557c",
+      "submodules": {
+        "subprojects/frida-core": "4f05cb60ce97660189962bfcf7ffca15e182848e",
+        "subprojects/frida-gum": "88e78178f786bf8cea2172ed6aeff335f30dd299",
+        "releng": "ddd0f5875c08edc005e9f89f7fdb7b0928fac4dc"
+      },
+      "ndk_revision": "25.2.9519653",
+      "ndk_major": 25,
+      "node_version": "22",
+      "node_status": "ci-choice-not-upstream-minimum",
+      "java_bridge": "bundled-6.3.9",
+      "targets": {"gadget": "frida-gadget", "server": "frida-server"}
+    },
+    {
+      "version": "17.25.2",
+      "release_status": "latest-17-release-verified",
+      "commit": "29016dbd9d8fce836b2b86892b04cc31c2f767aa",
+      "submodules": {
+        "subprojects/frida-core": "317363ce8064e3ede421ded3e53e1d3ffcfd782d",
+        "subprojects/frida-gum": "c73c1bbf24ab6bab4e46e11faedd051579e1e942",
+        "releng": "564352a3eac2ca0f5db776b6929955dbb20cf731"
+      },
+      "ndk_revision": "29.0.14206865",
+      "ndk_major": 29,
+      "node_version": "22",
+      "node_status": "ci-choice-not-upstream-minimum",
+      "java_bridge": "external-client-supplied",
+      "targets": {"gadget": "frida-gadget", "server": "frida-server"}
+    }
+  ]
+}

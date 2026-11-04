@@ -1,115 +1,169 @@
-name: build-frida
+name: build-nianchu-frida
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, fix/build-integrity]
   workflow_dispatch:
-    inputs:
-      v16:
-        description: '16.x version'
-        required: false
-        default: '16.7.19'
-      v17:
-        description: '17.x version'
-        required: false
-        default: '17.6.2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nianchu-build-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run offline regression gates
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          python3 -I -B -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee logs/regression.log
+      - name: Keep regression log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nianchu-regression-${{ github.run_id }}
+          path: logs/
+          if-no-files-found: error
+
   build:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
         include:
-          - frida_version: '16.7.19'
-            name: '16.7.19'
-            strict_patches: true
-            need_rust: false
-          - frida_version: '17.6.2'
-            name: '17.6.2'
-            strict_patches: false
-            need_rust: true
+          - version: '16.7.19'
+            ndk_revision: '25.2.9519653'
+          - version: '17.25.2'
+            ndk_revision: '29.0.14206865'
     runs-on: ubuntu-22.04
     timeout-minutes: 350
+    env:
+      FRIDA_VERSION: ${{ matrix.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Go for the Frida 17 compiler backend
+        if: matrix.version == '17.25.2'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Install host build dependencies
         run: |
+          set -euo pipefail
+          mkdir -p reports logs
           sudo apt-get update
-          sudo apt-get install -y build-essential git curl wget xz-utils python3 patch
-
-      - name: Install Rust (17.x rusda)
-        if: matrix.need_rust
+          sudo apt-get install -y build-essential git curl xz-utils python3 python3-dev patch unzip ninja-build pkg-config
+      - uses: android-actions/setup-android@v3
+      - name: Install exact upstream NDK revision
         run: |
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Pin NDK r25 (17.x compat)
-        if: matrix.need_rust
+          set -euo pipefail
+          sdkmanager "ndk;${{ matrix.ndk_revision }}" 2>&1 | tee logs/ndk.log
+          printf 'ANDROID_NDK_ROOT=%s/ndk/%s\n' "$ANDROID_HOME" '${{ matrix.ndk_revision }}' >> "$GITHUB_ENV"
+      - name: Clone pinned upstream source and initialize submodules
         run: |
-          cd frida-src
-          # frida 17.6.2 requires NDK r25; the auto-downloaded SDK has r27
-          # Override the SDK to use a compatible version
-          NDK_VER=$(grep -oP 'NDK r\d+' releng/*.py releng/*.sh 2>/dev/null | head -1 | grep -oP 'r\d+')
-          echo "frida expects NDK: $NDK_VER"
-          # Check if we can set the toolchain version
-          grep -r "toolchain_tag\|toolchain_version\|sdk_version" releng/configure releng/*.py 2>/dev/null | head -5 || true
-
-      - name: Clone frida source
+          set -euo pipefail
+          git clone --depth 1 --branch "$FRIDA_VERSION" --recurse-submodules --jobs 4 \
+            https://github.com/frida/frida.git frida-src 2>&1 | tee logs/source.log
+          git -C frida-src submodule update --init --recursive --jobs 4 2>&1 | tee -a logs/source.log
+      - name: Verify actual source commits and toolchain
         run: |
-          git clone --depth 1 --branch "${{ matrix.frida_version }}"             --recurse-submodules --jobs 8             https://github.com/frida/frida.git frida-src
-          cd frida-src
-          git rev-parse HEAD > ../frida-commit.txt
-          du -sh .
-
-      - name: Apply source patches
+          set -euo pipefail
+          python3 -I scripts/verify_source.py --source frida-src --version "$FRIDA_VERSION" \
+            --ndk "$ANDROID_NDK_ROOT" --report reports/source.json 2>&1 | tee logs/verify-source.log
+      - name: Apply compatible source profile strictly
         run: |
-          cd frida-src/subprojects/frida-core
-          for p in "$GITHUB_WORKSPACE"/patches/frida-core/*.patch; do
-            echo "== applying $(basename "$p") =="
-            patch -p1 --fuzz=5 < "$p" ||               echo "WARN: $(basename "$p") failed to apply cleanly (tolerated)" 
-          done
-          cd ../frida-gum
-          for p in "$GITHUB_WORKSPACE"/patches/frida-gum/*.patch; do
-            echo "== applying $(basename "$p") =="
-            patch -p1 --fuzz=5 < "$p" ||               echo "WARN: $(basename "$p") failed to apply cleanly (tolerated)" 
-          done
-
-      - name: Bypass NDK version check
+          set -euo pipefail
+          python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
+            --dry-run --report reports/compatible-dry-run.json 2>&1 | tee logs/compatible-patches.log
+          python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
+            --report reports/compatible.json 2>&1 | tee -a logs/compatible-patches.log
+      - name: Configure Android arm64 server and Gadget
+        working-directory: frida-src
         run: |
-          cd frida-src
-          # frida 的 configure 检查 NDK 版本（如 "r25 required"），SDK 自带的可能更新
-          # 找到检查代码并放行任何版本
-          grep -rn "is required.*unsupported\|which is unsupported" releng/ --include="*.py" --include="*.sh" | head -5
-          # 用 sed 把 "NDK rXX is required" 检查放宽
-          find releng/ -name "*.py" -exec sed -i             's/NDK r\(2[0-9]\) is required/NDK version check bypassed/'             {} \; 2>/dev/null || true
-          find releng/ -name "*.py" -exec sed -i             's/which is unsupported/NDK version accepted/'             {} \; 2>/dev/null || true
-          echo "NDK version check bypassed"
-
-      - name: Configure (android-arm64)
+          set -euo pipefail
+          extra=()
+          if [ "$FRIDA_VERSION" = '17.25.2' ]; then
+            go version | tee ../logs/go-version.log
+            extra+=(-Dfrida-core:compiler_backend=enabled)
+          fi
+          ./configure --host=android-arm64 -- \
+            -Dserver=enabled -Dgadget=enabled \
+            -Dfrida_tools=disabled -Dgraft_tool=disabled -Dportal=disabled \
+            -Dinject=disabled -Dfrida_python=disabled \
+            -Dfrida_node=disabled -Dfrida_swift=disabled -Dfrida_qml=disabled \
+            -Dfrida-core:tests=disabled -Dfrida-gum:tests=disabled \
+            -Dfrida-core:assets=embedded "${extra[@]}" \
+            2>&1 | tee ../logs/configure.log
+      - name: Build compatible server and automatic-init Gadget
+        working-directory: frida-src
         run: |
-          cd frida-src
-          ./configure --host=android-arm64 -- -Dfrida-gum:devkits=gumjs,gum
-
-      - name: Build
+          set -euo pipefail
+          make -j2 2>&1 | tee ../logs/compatible-build.log
+      - name: Verify compatible source and collect both final targets
         run: |
-          cd frida-src
-          make -j$(nproc)
-
-      - name: Collect + rename outputs
+          set -euo pipefail
+          python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
+            --report reports/compatible-post-build.json 2>&1 | tee logs/compatible-post-build.log
+          python3 -I scripts/collect_artifacts.py --build frida-src/build --version "$FRIDA_VERSION" \
+            --out out/compatible --source-report reports/source.json \
+            --patch-report reports/compatible-post-build.json 2>&1 | tee logs/compatible-collect.log
+      - name: Add explicit Zygisk initialization source feature
         run: |
-          mkdir -p out
-          GADGET=$(find frida-src/build -path '*lib/gadget*' -name '*.so' | head -1)
-          [ -n "$GADGET" ] && { cp "$GADGET" out/gadget.so; python3 patches/rename.py out/gadget.so; }
-          SERVER=$(find frida-src/build -type f \( -name 'frida-server*' -o -name 'rusda*' \) | head -1)
-          [ -n "$SERVER" ] && { cp "$SERVER" out/server.bin; python3 patches/rename.py out/server.bin; }
-          ls -l out/
-          [ -f out/gadget.so ] || { echo "no gadget built"; exit 1; }
-
-      - name: Upload artifact
+          set -euo pipefail
+          python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
+            --feature zygisk-loader --dry-run --report reports/zygisk-dry-run.json 2>&1 | tee logs/zygisk-patches.log
+          python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
+            --feature zygisk-loader --report reports/zygisk.json 2>&1 | tee -a logs/zygisk-patches.log
+      - name: Build module-specific Gadget incrementally
+        working-directory: frida-src
+        run: |
+          set -euo pipefail
+          make -j2 2>&1 | tee ../logs/zygisk-build.log
+      - name: Verify and collect module-specific final targets
+        run: |
+          set -euo pipefail
+          python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
+            --feature zygisk-loader --report reports/zygisk-post-build.json 2>&1 | tee logs/zygisk-post-build.log
+          python3 -I scripts/collect_artifacts.py --build frida-src/build --version "$FRIDA_VERSION" \
+            --out out/zygisk --source-report reports/source.json \
+            --patch-report reports/zygisk-post-build.json 2>&1 | tee logs/zygisk-collect.log
+      - name: Build wrapper and package verified final Gadget
+        run: |
+          set -euo pipefail
+          python3 -I scripts/build_module.py --ndk "$ANDROID_NDK_ROOT" \
+            --out out/module --manifest out/zygisk/manifest.json 2>&1 | tee logs/module-build.log
+      - name: Publish verified build artifacts only
         uses: actions/upload-artifact@v4
         with:
-          name: magic-frida-${{ matrix.name }}
-          path: out/
+          name: nianchu-frida-${{ matrix.version }}-android-arm64
+          path: |
+            out/compatible/
+            out/zygisk/
+            out/module/nianchu-zygisk-*.zip
+            out/module/build-report.json
+            NOTICE/
           if-no-files-found: error
+      - name: Keep provenance and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nianchu-build-logs-${{ matrix.version }}-${{ github.run_id }}
+          path: |
+            logs/
+            reports/
+            frida-src/build/meson-logs/
+            frida-src/build/meson-info/intro-targets.json
+          if-no-files-found: warn

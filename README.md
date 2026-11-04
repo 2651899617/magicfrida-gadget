@@ -1,53 +1,69 @@
-# magicfrida-gadget
+# nianchu-frida
 
-自构建的魔改 frida-gadget（Android arm64），目标：在 DexProtector 加固的 app
-里可用且不被检测。
+Android arm64 自有源码构建工程，面向自有或已明确授权的测试 App。固定 Frida **16.7.19** 和 **17.25.2**；版本、上游 SHA、子模块 SHA 与精确 NDK revision 见 `versions.json`。
 
-## 背景（检测模型，全部实测）
+## GitHub 编译
 
-DexProtector 的 native 检测在 `attachBaseContext` 里同步执行（启动后约
-0.4–1.1s），检测维度（详见看雪文章《新版 dexprotector 环境检测分析》）：
+公开构建仓库：<https://github.com/2651899617/magicfrida-gadget>。
 
-1. **inline hook 检测线程**：持续扫描 `libc` / `libart` / `libandroid`
-   的代码页，找异常跳转指令。stock frida 的 exit-monitor 在初始化时
-   `interceptor.attach` libc 的 `exit` / `abort` —— 必中。
-   本仓库用 `frida-disable_exit_monitor.patch` 在源码层移除。
-2. **frida-java-bridge 的 ArtMethod.prettyMethod hook**：bundled runtime
-   会 hook libart —— `frida-disable_art_prettymethod_hook.patch` 在生成
-   runtime 时删除。
-3. **信号处理器接管**（gum exceptor backend attach）——
-   `frida-disable_signal_attach.patch` 移除。
-4. **r_debug 链表枚举**：DP 通过 auxv→AT_PHDR→r_debug 遍历所有加载的 so。
-   注入侧（zygisk wrapper）需要在 `r_debug.r_map` 和链接器 `solist`
-   两条链上都摘掉 gadget 节点（见 magicfrida 仓库的 wrapper）。
-5. **字符串/内存特征**：构建后由 `patches/rename.py` 做同长度替换
-   （保留 `re.frida` 协议串，官方客户端直接可用）。
+`main`／`fix/build-integrity` 推送或手动触发 `.github/workflows/build.yml`：
 
-## 使用
+1. Linux 运行补丁、ELF、产物报告及真实 C++ 配置/SHA-256 回归。
+2. 16.7.19 使用 NDK r25c (`25.2.9519653`)，17.25.2 使用 r29 (`29.0.14206865`)；Node 22 是 CI 选择。
+3. 克隆固定 tag 并验证实际 SHA、所有子模块状态、NDK 安装实值和上游 NDK 要求；不绕过版本检查。
+4. 严格应用兼容补丁；全部文件/hash 预检查，禁止 fuzz 或失败继续。
+5. 构建并依据 Meson introspection 收集两个 installed final target，拒绝缺 server、raw 或 modulated 中间产物。
+6. 保存普通 Gadget 后，增量应用 `zygisk-loader` 并重建模块专用 Gadget，检查导出入口后打包。
+7. 全部步骤通过才上传产品 artifact；失败日志和来源报告始终保留。
 
-1. `push` 或手动 `workflow_dispatch` 触发构建（默认 frida 16.7.19）
-2. 在 Actions 页面下载 artifact `magic-gadget-arm64`
-3. 推到目标 app 的私有目录，由注入 wrapper `dlopen`（参考 magicfrida
-   仓库的 syscore wrapper：预置 → dlopen → 持链接器锁摘双链 → unlink）
-4. 官方 frida 客户端（协议 `re.frida`）`frida -H 127.0.0.1:<port> -p <pid>`
+每版 artifact `nianchu-frida-<version>-android-arm64` 包含：
 
-## 补丁
-
-| 补丁 | 作用 |
+| 路径 | 产物 |
 |---|---|
-| `frida-core/frida-disable_exit_monitor.patch` | 移除 libc exit/abort 的 inline hook |
-| `frida-gum/frida-disable_art_prettymethod_hook.patch` | 移除 bundled java-bridge 的 ArtMethod hook |
-| `frida-gum/frida-disable_signal_attach.patch` | 移除 gum exceptor 的信号接管 |
-| `patches/rename.py` | 构建后字符串指纹清理（同长度替换） |
+| `compatible/` | `nianchu-server-<version>-android-arm64`、`nianchu-gadget-<version>-android-arm64.so`、完整 manifest |
+| `zygisk/` | `nianchu-gadget-zygisk-<version>-android-arm64.so`（只供显式模块初始化）、对应 manifest |
+| `module/` | `nianchu-zygisk-<version>-android-arm64.zip`、wrapper 构建报告 |
 
-## 声明
+**普通 Gadget 和模块专用 Gadget 不可混用。** 模块专用 Android Gadget 不在构造函数中自动启动；必须通过模块调用 `nianchu_gadget_init`。普通 Gadget 保持官方构造函数与相邻配置加载方式。16/17 官方 server 均基于对应源码 target，不是 rusda/Rust 成品。17.25.2 的 Compiler 使用 Go 工具链，CI 安装 Go 1.26 并显式启用，避免 auto 模式缺依赖静默降级。
 
-仅供安全研究与授权测试使用。
+## 当前修改范围
 
-## frida 17.x 备注（参考《Frida 17.6.2 魔改 rusda》本地文档）
+默认 `nianchu-compatible` 仅包括经过固定源码联动检查的四类命名修改：server 临时目录、自有 agent 临时资源名、Gadget 线程标签、JS scheduler 线程标签。保留 `frida_agent_main` 和官方 `re.frida`／`re/frida`／`frida:rpc`；不改用户系统 Python、frida.exe。
 
-- frida 17 的 rusda（Rust 重写的 daemon）和 memfd 装载收敛让部分旧检测点失效
-- 源码级方案：协议字符串 hex-xor 运行时还原（`obfuscate.vala` decode_hex_xor +
-  `rpc.vala` get_rpc_str），`.rodata` 类型名等长反转，符号统一改名前缀
-- 17.6.2 的暴露面确实比 16.7.19 少（memfd 装载、Memory.patchCode 短暂开写权限、
-  注入链更轻量），本仓库的 rename.py 在两个版本上都适用
+| 可选 feature | 功能代价／状态 |
+|---|---|
+| `zygisk-loader` | 仅模块版启用；增加显式配置初始化入口，普通自动加载不适用 |
+| `exit-monitor-off` | 禁用退出准备 interception，可能影响有序退出；CI 默认不启用 |
+| `signal-interposition-off` | 禁用 signal/sigaction replace，保留异常 handler 安装/清理；可能影响异常处理，CI 默认不启用 |
+
+16 bundled Java bridge 固定 6.3.9，当前未修改 ART/GC/JDWP/PrettyMethod 功能。17 的 Java bridge 由客户端/脚本外置提供，不能声称 server/Gadget 补丁会修改它。当前补丁不是全面检测面隐藏，也不承诺所有 App 免检测。
+
+`patches/rename.py` 已改为**只读 ELF 边界审计**，不做任何二进制替换。hash 与 marker 报告不等于动态 lookup／协议握手验证。旧 `patches/frida-core`／`patches/frida-gum` 文件仅为历史参考，CI 不应用它们。
+
+## Zygisk
+
+说明和配置见 [`module/README.md`](module/README.md)。借鉴 xiaojia 的选目标、可配置延迟、listen/wait 和远程连接流程；不复制其 Gadget/loader 成品。默认无目标，按完整 UID 和精确进程名匹配；拒绝 system_server 与广域注入。不依赖 companion 或 libc++_shared，不写 App 数据目录、私有 linker 链表或全局属性，不吞退出信号。
+
+## 验证层级
+
+- 本地回归和 wrapper 交叉编译可证明对应源码模型/ELF检查通过。
+- Actions 成功才能证明本轮 16/17 server/Gadget 完整构建通过。
+- 官方客户端握手、JS/Java/GC/异常/方法替换、Zygisk/SELinux 加载及目标 App 真实业务**仍需独立运行测试**。
+- 监听、PID 活着、脚本打印或编译通过不等于 App 正常使用。
+
+当前状态与未覆盖项见 [`docs/STATUS.md`](docs/STATUS.md)，补丁取舍见 [`docs/patch-decisions.md`](docs/patch-decisions.md)。
+
+## KPM 边界
+
+内核工程不在本仓库构建工作流内。最新本地 KPM 安全基线只提供默认无 hook、可选精确 reader UID 的有界观察，**不包含 maps/路径/调试状态隐藏能力**。离线 ELF/策略检查不等于目标内核 ABI 或真实加载验证；不能将该观察基线称为通用隐藏模块已完成。
+
+本次构建不包含 ADB 部署、KPM 加载、手机重启、system_server 注入、改 `/data/system`／`/data/app`、清数据或 App 安装卸载。
+
+## 本地检查
+
+```text
+python -I -B -m unittest discover -s tests -p "test_*.py" -v
+python -I scripts/build_module.py --ndk <NDK r25c 或 r29> --out <新的输出目录>
+```
+
+无 manifest 时只构建 wrapper，不生成伪 Gadget 或模块 zip。完整模块打包必须使用收集器生成的 `zygisk/manifest.json`。

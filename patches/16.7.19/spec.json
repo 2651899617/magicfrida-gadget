@@ -1,0 +1,149 @@
+{
+  "version": "16.7.19",
+  "source": {
+    "subprojects/frida-core": "4f05cb60ce97660189962bfcf7ffca15e182848e",
+    "subprojects/frida-gum": "88e78178f786bf8cea2172ed6aeff335f30dd299",
+    "releng": "ddd0f5875c08edc005e9f89f7fdb7b0928fac4dc"
+  },
+  "features": [
+    "exit-monitor-off",
+    "signal-interposition-off",
+    "zygisk-loader"
+  ],
+  "java_bridge": {
+    "mode": "bundled-6.3.9",
+    "modified": false,
+    "reason": "ART/GC/JDWP removal needs functional replacement and runtime tests"
+  },
+  "files": [
+    {
+      "path": "subprojects/frida-core/server/server.vala",
+      "upstream_sha256": "e6031b72a044fd413371ee425a06321e1781cb042fb47ff43af06e511cb1801b",
+      "edits": [
+        {
+          "old": "\"re.frida.server\"",
+          "new": "\"nianchu.server\"",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/linux/linux-host-session.vala",
+      "upstream_sha256": "d0b2583bb4963c4062e6fe3826dfbf49070d18bd161a2036421d2454c58e3d06",
+      "edits": [
+        {
+          "old": "\"frida-agent-<arch>.so\"",
+          "new": "\"nianchu-agent-<arch>.so\"",
+          "count": 1
+        },
+        {
+          "old": "\"frida-agent-arm.so\"",
+          "new": "\"nianchu-agent-arm.so\"",
+          "count": 2
+        },
+        {
+          "old": "\"frida-agent-arm64.so\"",
+          "new": "\"nianchu-agent-arm64.so\"",
+          "count": 2
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/gadget/gadget-glue.c",
+      "upstream_sha256": "6d330ad869ea99da69cf172dd204c58a29910c4bbc7c781d2533cab11d767b3e",
+      "edits": [
+        {
+          "old": "g_thread_new (\"frida-gadget\",",
+          "new": "g_thread_new (\"nianchu-gadget\",",
+          "count": 1
+        }
+      ],
+      "optional": {
+        "zygisk-loader": [
+          {
+            "old": "__attribute__ ((constructor)) static void\nfrida_on_load (void)\n{\n  frida_gadget_load (NULL, NULL, NULL);\n}",
+            "new": "#ifdef HAVE_ANDROID\n/* The module invokes this after android_dlopen_ext has released the linker lock. */\n__attribute__ ((visibility (\"default\"))) void\nnianchu_gadget_init (const gchar * config_data, int * result)\n{\n  frida_gadget_load (NULL, config_data, result);\n}\n#endif\n\n__attribute__ ((constructor)) static void\nfrida_on_load (void)\n{\n#ifndef HAVE_ANDROID\n  frida_gadget_load (NULL, NULL, NULL);\n#else\n  /* Keep the constructor visible to the upstream constructor-ordering tool. */\n  __asm__ volatile (\"\" ::: \"memory\");\n#endif\n}",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-gum/bindings/gumjs/gumscriptscheduler.c",
+      "upstream_sha256": "8c4e006efccb2d9858ea4cd32e8a66224f805f80ebd12fb3ec3f25032689f60d",
+      "edits": [
+        {
+          "old": "g_thread_new (\"gum-js-loop\",",
+          "new": "g_thread_new (\"nianchu-js\",",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/payload/exit-monitor.vala",
+      "upstream_sha256": "426fb632d2fb97c7176af9f5dbc28b5dca546ebb0cfc9f08e6df1cf2534cc68a",
+      "edits": [],
+      "optional": {
+        "exit-monitor-off": [
+          {
+            "old": "\t\tconstruct {\n\t\t\tvar interceptor = Gum.Interceptor.obtain ();\n\n\t\t\tunowned Gum.InvocationListener listener = this;\n\n#if WINDOWS\n\t\t\tinterceptor.attach ((void *) Gum.Process.find_module_by_name (\"kernel32.dll\").find_export_by_name (\"ExitProcess\"),\n\t\t\t\tlistener);\n#else\n\t\t\tvar libc = Gum.Process.get_libc_module ();\n\t\t\tconst string[] apis = {\n\t\t\t\t\"exit\",\n\t\t\t\t\"_exit\",\n\t\t\t\t\"abort\",\n\t\t\t};\n\t\t\tforeach (var symbol in apis) {\n\t\t\t\tinterceptor.attach ((void *) libc.find_export_by_name (symbol), listener);\n\t\t\t}\n#endif\n\t\t}\n",
+            "new": "\t\tconstruct {\n\t\t\t// Experimental: exit preparation interception is disabled.\n\t\t}\n",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c",
+      "upstream_sha256": "23df15c6a08eae1e1ff3a97b8eb3ebd6c61c187d1ad3a5854659054fd227ea0c",
+      "edits": [],
+      "optional": {
+        "signal-interposition-off": [
+          {
+            "old": "gum_interceptor_replace (interceptor, gum_original_signal,\n      gum_exceptor_backend_replacement_signal, self, NULL);",
+            "new": "/* Experimental: signal interposition disabled. */",
+            "count": 1
+          },
+          {
+            "old": "gum_interceptor_replace (interceptor, gum_original_sigaction,\n      gum_exceptor_backend_replacement_sigaction, self, NULL);",
+            "new": "/* Experimental: sigaction interposition disabled. */",
+            "count": 1
+          },
+          {
+            "old": "gum_interceptor_revert (interceptor, gum_original_signal);",
+            "new": "/* signal interposition was not installed. */",
+            "count": 1
+          },
+          {
+            "old": "gum_interceptor_revert (interceptor, gum_original_sigaction);",
+            "new": "/* sigaction interposition was not installed. */",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-gum/bindings/gumjs/generate-runtime.py",
+      "upstream_sha256": "76762b1008551f3123454908eb855bd613fbc72af7560932d83ef278c0b7fdaf",
+      "edits": [],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/gadget/frida-gadget.version",
+      "upstream_sha256": "9d7f53f8c32953f41e458ddc7f43601b4ea31b4be69c17ee6d7ced54a2724d1e",
+      "edits": [],
+      "optional": {
+        "zygisk-loader": [
+          {
+            "old": "  local:\n",
+            "new": "  global:\n    nianchu_gadget_init;\n  local:\n",
+            "count": 1
+          }
+        ]
+      }
+    }
+  ]
+}

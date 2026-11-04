@@ -1,0 +1,64 @@
+--- a/subprojects/frida-core/server/server.vala
++++ b/subprojects/frida-core/server/server.vala
+@@ -3,7 +3,7 @@
+ namespace Frida.Server {
+ 	private static Application application;
+ 
+-	private const string DEFAULT_DIRECTORY = "re.frida.server";
++	private const string DEFAULT_DIRECTORY = "nianchu.server";
+ 	private static bool output_version = false;
+ 	private static string? device_id = null;
+ 	private static string? listen_address = null;
+--- a/subprojects/frida-core/src/linux/linux-host-session.vala
++++ b/subprojects/frida-core/src/linux/linux-host-session.vala
+@@ -66,12 +66,12 @@
+ 			var blob64 = Frida.Data.Agent.get_frida_agent_64_so_blob ();
+ 			var emulated_arm = Frida.Data.Agent.get_frida_agent_arm_so_blob ();
+ 			var emulated_arm64 = Frida.Data.Agent.get_frida_agent_arm64_so_blob ();
+-			agent = new AgentDescriptor (PathTemplate ("frida-agent-<arch>.so"),
++			agent = new AgentDescriptor (PathTemplate ("nianchu-agent-<arch>.so"),
+ 				new Bytes.static (blob32.data),
+ 				new Bytes.static (blob64.data),
+ 				new AgentResource[] {
+-					new AgentResource ("frida-agent-arm.so", new Bytes.static (emulated_arm.data), tempdir),
+-					new AgentResource ("frida-agent-arm64.so", new Bytes.static (emulated_arm64.data), tempdir),
++					new AgentResource ("nianchu-agent-arm.so", new Bytes.static (emulated_arm.data), tempdir),
++					new AgentResource ("nianchu-agent-arm64.so", new Bytes.static (emulated_arm64.data), tempdir),
+ 				},
+ 				AgentMode.INSTANCED,
+ 				tempdir);
+@@ -433,10 +433,10 @@
+ 			unowned string name;
+ 			switch (cpu_type_from_pid (pid)) {
+ 				case Gum.CpuType.IA32:
+-					name = "frida-agent-arm.so";
++					name = "nianchu-agent-arm.so";
+ 					break;
+ 				case Gum.CpuType.AMD64:
+-					name = "frida-agent-arm64.so";
++					name = "nianchu-agent-arm64.so";
+ 					break;
+ 				default:
+ 					throw new Error.NOT_SUPPORTED ("Emulated realm is not supported on this architecture");
+--- a/subprojects/frida-core/lib/gadget/gadget-glue.c
++++ b/subprojects/frida-core/lib/gadget/gadget-glue.c
+@@ -112,7 +112,7 @@
+ 
+   worker_context = g_main_context_ref (g_main_context_default ());
+   worker_loop = g_main_loop_new (worker_context, FALSE);
+-  worker_thread = g_thread_new ("frida-gadget", run_worker_loop, NULL);
++  worker_thread = g_thread_new ("nianchu-gadget", run_worker_loop, NULL);
+ }
+ 
+ void
+--- a/subprojects/frida-gum/bindings/gumjs/gumscriptscheduler.c
++++ b/subprojects/frida-gum/bindings/gumjs/gumscriptscheduler.c
+@@ -114,7 +114,7 @@
+   {
+     self->js_loop = g_main_loop_new (self->js_context, TRUE);
+ 
+-    self->js_thread = g_thread_new ("gum-js-loop",
++    self->js_thread = g_thread_new ("nianchu-js",
+         (GThreadFunc) gum_script_scheduler_run_js_loop, self);
+   }
+ }

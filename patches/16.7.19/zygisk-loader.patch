@@ -1,0 +1,36 @@
+--- a/subprojects/frida-core/lib/gadget/gadget-glue.c
++++ b/subprojects/frida-core/lib/gadget/gadget-glue.c
+@@ -67,10 +67,24 @@
+ 
+ #else
+ 
++#ifdef HAVE_ANDROID
++/* The module invokes this after android_dlopen_ext has released the linker lock. */
++__attribute__ ((visibility ("default"))) void
++nianchu_gadget_init (const gchar * config_data, int * result)
++{
++  frida_gadget_load (NULL, config_data, result);
++}
++#endif
++
+ __attribute__ ((constructor)) static void
+ frida_on_load (void)
+ {
++#ifndef HAVE_ANDROID
+   frida_gadget_load (NULL, NULL, NULL);
++#else
++  /* Keep the constructor visible to the upstream constructor-ordering tool. */
++  __asm__ volatile ("" ::: "memory");
++#endif
+ }
+ 
+ __attribute__ ((destructor)) static void
+--- a/subprojects/frida-core/lib/gadget/frida-gadget.version
++++ b/subprojects/frida-core/lib/gadget/frida-gadget.version
+@@ -1,4 +1,6 @@
+ {
++  global:
++    nianchu_gadget_init;
+   local:
+     *;
+ };

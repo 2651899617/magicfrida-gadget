@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+frida-src/
+out/
+reports/
+logs/

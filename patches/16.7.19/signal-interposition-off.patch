@@ -1,0 +1,26 @@
+--- a/subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c
++++ b/subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c
+@@ -265,10 +265,8 @@
+ 
+   gum_interceptor_begin_transaction (interceptor);
+ 
+-  gum_interceptor_replace (interceptor, gum_original_signal,
+-      gum_exceptor_backend_replacement_signal, self, NULL);
+-  gum_interceptor_replace (interceptor, gum_original_sigaction,
+-      gum_exceptor_backend_replacement_sigaction, self, NULL);
++  /* Experimental: signal interposition disabled. */
++  /* Experimental: sigaction interposition disabled. */
+ 
+   gum_interceptor_end_transaction (interceptor);
+ }
+@@ -281,8 +279,8 @@
+ 
+   gum_interceptor_begin_transaction (interceptor);
+ 
+-  gum_interceptor_revert (interceptor, gum_original_signal);
+-  gum_interceptor_revert (interceptor, gum_original_sigaction);
++  /* signal interposition was not installed. */
++  /* sigaction interposition was not installed. */
+ 
+   gum_interceptor_end_transaction (interceptor);
+ 
