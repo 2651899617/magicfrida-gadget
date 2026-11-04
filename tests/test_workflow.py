@@ -28,6 +28,11 @@ class WorkflowTests(unittest.TestCase):
                         source.index('uses: android-actions/setup-android@v3'))
         self.assertNotIn('SKIP_JDK_VERSION_CHECK', source)
 
+    def test_android_setup_does_not_request_obsolete_tools(self):
+        source = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')
+        self.assertIn("packages: 'platform-tools'", source)
+        self.assertNotIn('packages: tools', source)
+
     def test_workflow_syntax_and_build_contract(self):
         # YAML is an optional local check; the static build contract always runs.
         source = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')

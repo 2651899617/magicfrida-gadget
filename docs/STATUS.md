@@ -6,9 +6,9 @@
 |---|---|---|
 | 版本 | 官方 tags、固定 super/core/gum/releng SHA、16 r25c / 17 r29 要求 | 不自动跟随未来版本 |
 | 补丁 | 两版八份 pinned 文件 guard、兼容命名修改、独立 feature、严格重放与完整报告校验 | ART/GC/JDWP 的功能性隐藏替代、所有参考 patch 全面移植 |
-| 本地回归 | 46 项通过；真实 C++ 配置/SHA-256 30 检查通过 | 这些测试不是 Android runtime |
+| 本地回归 | 47 项通过；真实 C++ 配置/SHA-256 30 检查通过 | 这些测试不是 Android runtime |
 | Zygisk wrapper | 本机 r25c 交叉编译；真实 exported entry、NEEDED 检查通过，无 libc++_shared | 17 r29 构建、完整 Gadget 集成、设备 SELinux/namespace/FD 加载 |
-| GitHub | 首轮 Linux 回归通过；两版均在 sdkmanager 要求 JDK 17、runner 使用 JDK 11 时失败；已加入显式 JDK 17 配置 | 本轮 server/Gadget 完整构建尚未完成 |
+| GitHub | Linux 回归通过；JDK 17 修复后许可证接受成功，但旧默认 SDK `tools` 包不存在；已改为显式 platform-tools 与精确 NDK | 本轮 server/Gadget 完整构建尚未完成 |
 | App | 无新设备操作 | 官方握手、JS/Java/GC/异常/业务可用性及长期稳定性均未验证 |
 | KPM | 本地观察基线离线策略/ELF 测试；默认无 hook | 隐藏能力未完成，目标内核 ABI 和加载未经本轮验证 |
 
