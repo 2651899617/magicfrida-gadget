@@ -45,6 +45,17 @@ jobs:
           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Pin NDK r25 (17.x compat)
+        if: matrix.need_rust
+        run: |
+          cd frida-src
+          # frida 17.6.2 requires NDK r25; the auto-downloaded SDK has r27
+          # Override the SDK to use a compatible version
+          NDK_VER=$(grep -oP 'NDK r\d+' releng/*.py releng/*.sh 2>/dev/null | head -1 | grep -oP 'r\d+')
+          echo "frida expects NDK: $NDK_VER"
+          # Check if we can set the toolchain version
+          grep -r "toolchain_tag\|toolchain_version\|sdk_version" releng/configure releng/*.py 2>/dev/null | head -5 || true
+
       - name: Clone frida source
         run: |
           git clone --depth 1 --branch "${{ matrix.frida_version }}"             --recurse-submodules --jobs 8             https://github.com/frida/frida.git frida-src
