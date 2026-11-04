@@ -66,6 +66,11 @@ jobs:
           mkdir -p reports logs
           sudo apt-get update
           sudo apt-get install -y build-essential git curl xz-utils python3 python3-dev patch unzip ninja-build pkg-config
+      - name: Configure JDK 17 for Android SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
       - uses: android-actions/setup-android@v3
       - name: Install exact upstream NDK revision
         run: |
@@ -107,7 +112,7 @@ jobs:
             -Dfrida-core:tests=disabled -Dfrida-gum:tests=disabled \
             -Dfrida-core:assets=embedded "${extra[@]}" \
             2>&1 | tee ../logs/configure.log
-      - name: Build compatible server and automatic-init Gadget
+      - name: Build nianchu server and modified auto-init Gadget
         working-directory: frida-src
         run: |
           set -euo pipefail
