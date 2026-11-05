@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Offline ELF regression tests; these do not execute Android code."""
 import importlib.util
+import contextlib
+import io
+import json
 import os
 from pathlib import Path
 import struct
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('elf_rewrite', ROOT / 'patches/rename.py')
@@ -94,6 +99,105 @@ class ElfRewriteTests(unittest.TestCase):
     def test_unequal_replacement_rejected(self):
         with self.assertRaisesRegex(ValueError, 'preserve byte length'):
             elf.replace_equal(fixture(), b'gadget', b'longer-name')
+
+    def test_patched_embedders_repeat_both_asset_slots(self):
+        # The inputs model ELF64; ARM32 machine-code coverage comes from CI.
+        for version in ('16.7.19', '17.25.2'):
+            profile = json.loads((ROOT / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
+            for kind in ('helper', 'agent'):
+                with self.subTest(version=version, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source = root / 'input.so'
+                    source.write_bytes(fixture().replace(b'frida_one', b'other_one'))
+                    entry = next(item for item in profile['files']
+                                 if item['path'].endswith('/embed-' + kind + '.py'))
+                    text = (ROOT / 'tests/fixtures' / version / entry['path']).read_text(encoding='utf-8')
+                    for edit in entry['edits']:
+                        self.assertEqual(text.count(edit['old']), edit['count'])
+                        text = text.replace(edit['old'], edit['new'])
+                    namespace = {'__name__': 'embed_test'}
+                    exec(compile(text, entry['path'], 'exec'), namespace)
+                    resource_calls = []
+
+                    def run(command, check):
+                        if command[0] == 'resource-compiler':
+                            resource_calls.append(command)
+                        else:
+                            self.assertEqual(elf.main(command[3:]), 0)
+
+                    args = ['embed', 'android', 'arm64', 'gnu', 'resource-compiler',
+                            '>>>', '', '<<<', str(root), str(root / 'private'), 'resources',
+                            str(source), str(source), '', '']
+                    if kind == 'agent':
+                        args += ['', '']
+                    with mock.patch.dict(os.environ, {'NIANCHU_ELF_REWRITER': str(ROOT / 'patches/rename.py')}), \
+                            mock.patch('subprocess.run', side_effect=run), \
+                            mock.patch.object(elf, 'AGENT_ENTRY', 'other_one'), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        namespace['main'](args)
+                        before = {path.name: path.read_bytes() for path in (root / 'private').iterdir()}
+                        namespace['main'](args)
+                        self.assertEqual(before, {path.name: path.read_bytes()
+                                                  for path in (root / 'private').iterdir()})
+                        self.assertEqual(len(resource_calls), 2)
+                        self.assertEqual(len(list((root / 'private').glob('*.rewrite.json'))), 2)
+
+    def test_incremental_embed_recopy_and_report_publish_rollback(self):
+        try:
+            import lief  # noqa: F401
+        except ImportError:
+            self.skipTest('rewrite requires pinned LIEF')
+        for kind in ('helper', 'agent'):
+            for arch in ('32', '64'):
+                with self.subTest(kind=kind, arch=arch), tempfile.TemporaryDirectory() as directory:
+                    artifact = Path(directory) / ('frida-' + kind + '-' + arch)
+                    sidecar = Path(str(artifact) + '.rewrite.json')
+                    original = fixture()
+                    # Agent reports require the supported initialization export.
+                    if kind == 'agent':
+                        original = original.replace(b'frida_one', b'other_one')
+                        with mock.patch.object(elf, 'AGENT_ENTRY', 'other_one'):
+                            self._check_incremental_rewrite(artifact, sidecar, original, kind)
+                    else:
+                        self._check_incremental_rewrite(artifact, sidecar, original, kind)
+
+    def _check_incremental_rewrite(self, artifact, sidecar, original, kind):
+        args = [str(artifact), '--rewrite', '--kind', kind, '--report', str(sidecar)]
+        artifact.write_bytes(original)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(elf.main(args), 0)
+            rewritten, saved = artifact.read_bytes(), sidecar.read_bytes()
+            self.assertNotEqual(original, rewritten)
+            self.assertEqual(elf.main(args), 0)
+            self.assertEqual(artifact.read_bytes(), rewritten)
+            # embed-agent/embed-helper overwrite the destination on each run.
+            artifact.write_bytes(original)
+            self.assertEqual(elf.main(args), 0)
+            self.assertEqual(artifact.read_bytes(), rewritten)
+            self.assertEqual(sidecar.read_bytes(), saved)
+            artifact.write_bytes(original)
+            replace = os.replace
+
+            def fail_report(source, destination):
+                if destination == sidecar:
+                    raise OSError('injected sidecar publication failure')
+                return replace(source, destination)
+
+            with mock.patch.object(elf.os, 'replace', side_effect=fail_report):
+                self.assertEqual(elf.main(args), 1)
+            self.assertEqual(artifact.read_bytes(), original)
+            self.assertEqual(sidecar.read_bytes(), saved)
+            self.assertEqual(elf.main(args), 0)
+            artifact.write_bytes(original + b'unrecognized-build')
+            self.assertEqual(elf.main(args), 1)
+            self.assertEqual(artifact.read_bytes(), original + b'unrecognized-build')
+            self.assertEqual(sidecar.read_bytes(), saved)
+            artifact.write_bytes(original)
+            corrupt = json.loads(saved)
+            corrupt['kind'] = 'server'
+            sidecar.write_text(json.dumps(corrupt), encoding='utf-8')
+            self.assertEqual(elf.main(args), 1)
+            self.assertEqual(artifact.read_bytes(), original)
 
     def test_four_real_gadgets_in_memory(self):
         artifact_root = Path(os.environ.get('NIANCHU_ELF_SMOKE_ROOT', str(ROOT.parent / 'work')))

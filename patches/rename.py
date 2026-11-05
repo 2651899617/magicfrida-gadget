@@ -465,28 +465,53 @@ def main(argv=None):
             raise ValueError('rewrite requires --kind and --report')
         data = args.artifact.read_bytes()
         if args.rewrite:
-            # Strict idempotence for the copy used by embed-agent/embed-helper.
+            # Embedders recopy the original ELF on incremental builds while
+            # leaving the previous sidecar in place. Accept only either identity.
+            saved = None
             if args.report.exists():
                 saved = json.loads(args.report.read_text(encoding='utf-8'))
-                validate_rewrite_report(data, saved, args.kind)
-                result = saved
+                if isinstance(saved, dict) and saved.get('after') == audit(data, arm64=False):
+                    validate_rewrite_report(data, saved, args.kind)
+                    result = saved
+                else:
+                    if not isinstance(saved, dict) or saved.get('before') != audit(data, arm64=False):
+                        raise ValueError('ELF matches neither original nor rewritten report identity')
+                    output, result = rewrite(data, args.kind, seed=saved.get('seed'))
+                    # Reconstructing the recorded output must also validate the
+                    # complete old report before replacing either file.
+                    validate_rewrite_report(output, saved, args.kind)
             else:
                 output, result = rewrite(data, args.kind)
+            if saved is None or result is not saved:
                 temporary = args.artifact.with_name(args.artifact.name + '.nianchu-rewrite-tmp')
+                report_temporary = args.report.with_name(args.report.name + '.nianchu-rewrite-tmp')
+                mode = args.artifact.stat().st_mode & 0o777
                 try:
+                    args.report.parent.mkdir(parents=True, exist_ok=True)
                     with temporary.open('xb') as stream:
                         stream.write(output)
-                    temporary.chmod(args.artifact.stat().st_mode & 0o777)
+                    temporary.chmod(mode)
+                    with report_temporary.open('x', encoding='utf-8', newline='\n') as stream:
+                        json.dump(result, stream, indent=2)
+                        stream.write('\n')
                     if args.artifact.read_bytes() != data:
                         raise ValueError('input ELF changed during rewriting')
                     os.replace(temporary, args.artifact)
+                    try:
+                        os.replace(report_temporary, args.report)
+                    except OSError:
+                        # Restore the input if publishing its sidecar fails.
+                        with temporary.open('xb') as stream:
+                            stream.write(data)
+                        temporary.chmod(mode)
+                        os.replace(temporary, args.artifact)
+                        raise
                 finally:
                     if temporary.exists():
                         temporary.unlink()
-                args.report.parent.mkdir(parents=True, exist_ok=True)
-                with args.report.open('x', encoding='utf-8', newline='\n') as stream:
-                    json.dump(result, stream, indent=2)
-                    stream.write('\n')
+                    if report_temporary.exists():
+                        report_temporary.unlink()
+
         else:
             result = audit(data)
             if args.report:
