@@ -191,7 +191,7 @@ class ArtifactTests(unittest.TestCase):
                 with self.subTest(version=version, features=features):
                     context = self.collection_fixture(version + '-entry-' + str(index), version, features)
                     report = self.collect(context)
-                    renamed = 'agent-entrypoint-rename' in features
+                    renamed = 'agent-entrypoint-rename' in context.patches['features']
                     for kind, artifact in report['artifacts'].items():
                         self.assertEqual('-entry-renamed-' in artifact['file'], renamed)
                         entry = artifact['agent_entrypoint']
@@ -225,7 +225,7 @@ class ArtifactTests(unittest.TestCase):
                     report = self.collect(context)
                     gadget = report['artifacts']['gadget']
                     server = report['artifacts']['server']
-                    variant = '-entry-renamed' if 'agent-entrypoint-rename' in features else ''
+                    variant = '-entry-renamed' if 'agent-entrypoint-rename' in context.patches['features'] else ''
                     label = 'gadget-zygisk' if 'zygisk-loader' in features else 'gadget'
                     self.assertEqual(gadget['file'], 'nianchu-' + label + variant + '-json-config-' + version + '-android-arm64.so')
                     self.assertEqual(server['file'], 'nianchu-server' + variant + '-' + version + '-android-arm64')
@@ -317,7 +317,7 @@ class ArtifactTests(unittest.TestCase):
                 out = context.root / 'module-model'
                 with mock.patch.object(builder, 'run', side_effect=run), mock.patch('builtins.print'):
                     built = builder.build(ndk, out, context.root / 'out/manifest.json')
-                variant = '-entry-renamed' if renamed else ''
+                variant = collector.artifact_variant('gadget', context.patches['features']).removesuffix('-json-config')
                 archive = out / ('nianchu-zygisk' + variant + '-json-config-' + version + '-android-arm64.zip')
                 with zipfile.ZipFile(archive) as package:
                     self.assertEqual(package.read('gadget/libnianchu-gadget.so'), fixture(version))
@@ -326,6 +326,73 @@ class ArtifactTests(unittest.TestCase):
                     self.assertEqual(json.loads(package.read('build-report.json'))['gadget_manifest'], report)
                 self.assertEqual(built['zygisk_load'], 'not-tested')
         print('PASS module zip source model: compiler/readelf stubbed; no real wrapper or Android claim')
+
+    def test_rewrite_collection_and_module_entry_model(self):
+        # Consumer model: the ELF algorithm itself is tested independently.
+        spec = importlib.util.spec_from_file_location('module_builder', ROOT / 'scripts/build_module.py')
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        for version in patches.VERSIONS:
+            context = self.collection_fixture(version + '-rewrite', version, ['zygisk-loader'])
+            original = fixture(version)
+            rewritten = original.replace(b'frida:rpc', b'other:rpc')
+            entry = 'nianchu_ABCDEF_init'
+
+            def rewrite(data, kind):
+                self.assertEqual(data, original)
+                return rewritten, {'kind': kind, 'initialization_symbol': entry,
+                                   'before': collector.elf.audit(data), 'after': collector.elf.audit(rewritten)}
+
+            def validate(data, report, kind):
+                if (not isinstance(report, dict) or report.get('kind') != kind
+                        or report.get('after') != collector.elf.audit(data)
+                        or report.get('initialization_symbol') != entry):
+                    raise ValueError('invalid model rewrite report')
+
+            with mock.patch.object(collector.elf, 'rewrite', side_effect=rewrite), \
+                    mock.patch.object(collector.elf, 'validate_rewrite_report', side_effect=validate):
+                report = collector.collect(context.build, version, context.root / 'out',
+                                           context.source_path, context.patch_path, True)
+            self.assertTrue(report['binary_modified'])
+            for kind, artifact in report['artifacts'].items():
+                self.assertIn('-elf-rewritten-', artifact['file'])
+                self.assertEqual('-json-config-' in artifact['file'], kind == 'gadget')
+                self.assertEqual((context.build / FINAL_FILENAMES[kind]).read_bytes(), original)
+                self.assertEqual((context.root / 'out' / artifact['file']).read_bytes(), rewritten)
+                sidecar = context.root / 'out' / (artifact['file'] + '.rewrite.json')
+                self.assertEqual(json.loads(sidecar.read_text()), artifact['elf_rewrite'])
+            manifest = context.root / 'out/manifest.json'
+            ndk = context.root / 'model-ndk'
+            ndk.mkdir()
+            (ndk / 'source.properties').write_text('Pkg.Revision = ' + context.expected['ndk_revision'])
+            out = context.root / 'module-model'
+
+            def run(*args):
+                if str(args[0]).endswith(('clang++', 'clang++.exe')):
+                    self.assertIn(out / 'module.cpp', args)
+                    self.assertIn('"' + entry + '"', (out / 'module.cpp').read_text())
+                    args[args.index('-o') + 1].write_bytes(b'MODEL WRAPPER')
+                    return ''
+                if '--dyn-syms' in args:
+                    symbol = 'zygisk_module_entry' if args[-1].name == 'arm64-v8a.so' else entry
+                    return '1: 0 0 FUNC GLOBAL DEFAULT 1 ' + symbol + '\n'
+                return '(NEEDED) Shared library: [libc.so]\n'
+
+            with mock.patch.object(builder.collector.elf, 'validate_rewrite_report', side_effect=validate), \
+                    mock.patch.object(builder, 'run', side_effect=run), mock.patch('builtins.print'):
+                built = builder.build(ndk, out, manifest)
+                self.assertEqual(built['initialization_symbol'], entry)
+                self.assertEqual(built['compiled_source_sha256'], hashlib.sha256((out / 'module.cpp').read_bytes()).hexdigest())
+                archive = next(out.glob('*.zip'))
+                self.assertIn('-elf-rewritten-json-config-', archive.name)
+                with zipfile.ZipFile(archive) as package:
+                    self.assertEqual(package.read('gadget/libnianchu-gadget.so'), rewritten)
+                for field, value in (('elf_rewrite', None), ('binary_modified', False)):
+                    wrong = copy.deepcopy(report)
+                    wrong['artifacts']['gadget'][field] = value
+                    write_json(manifest, wrong)
+                    with self.assertRaises(ValueError):
+                        builder.payload_from_manifest(manifest)
 
     def test_single_applied_record_regression(self):
         context = self.collection_fixture()
@@ -364,7 +431,7 @@ class ArtifactTests(unittest.TestCase):
         variants = {'schema': [0, 2, True, '1'], 'version': ['17.25.2', None],
                     'profile': ['', 'other', None], 'dry_run': [True, 0, None],
                     'binary_rewriting': [True, 0], 'runtime_tested': [True, 0],
-                    'java_bridge': [{}, {**context.patches['java_bridge'], 'modified': True}],
+                    'java_bridge': [{}, {**context.patches['java_bridge'], 'modified': not context.patches['java_bridge']['modified']}],
                     'features': [None, {}, '', ['unknown-feature'], ['exit-monitor-off', 'exit-monitor-off'], [None]]}
         for field, values in variants.items():
             for value in values:

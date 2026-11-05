@@ -26,7 +26,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p logs
-          python3 -I -B -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee logs/regression.log
+          sudo apt-get update
+          sudo apt-get install -y python3-venv
+          python3 -I -m venv "$GITHUB_WORKSPACE/.checks-venv"
+          "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -m pip install 'lief==0.17.6'
+          "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -B -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee logs/regression.log
       - name: Keep regression log
         if: always()
         uses: actions/upload-artifact@v4
@@ -65,7 +69,15 @@ jobs:
           set -euo pipefail
           mkdir -p reports logs
           sudo apt-get update
-          sudo apt-get install -y build-essential git curl xz-utils python3 python3-dev patch unzip ninja-build pkg-config
+          sudo apt-get install -y build-essential git curl xz-utils python3 python3-dev python3-venv patch unzip ninja-build pkg-config
+      - name: Configure isolated ELF rewrite tooling
+        run: |
+          set -euo pipefail
+          python3 -I -m venv "$GITHUB_WORKSPACE/.elf-venv"
+          "$GITHUB_WORKSPACE/.elf-venv/bin/python3" -I -m pip install 'lief==0.17.6'
+          printf '%s\n' "$GITHUB_WORKSPACE/.elf-venv/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "NIANCHU_ELF_REWRITER=$GITHUB_WORKSPACE/patches/rename.py" >> "$GITHUB_ENV"
+          printf '%s\n' "NIANCHU_BRIDGE_PATCHER=$GITHUB_WORKSPACE/scripts/patch_reference_bridge.py" >> "$GITHUB_ENV"
       - name: Configure JDK 17 for Android SDK tools
         uses: actions/setup-java@v4
         with:
@@ -125,7 +137,7 @@ jobs:
           set -euo pipefail
           python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
             --report reports/compatible-post-build.json 2>&1 | tee logs/compatible-post-build.log
-          python3 -I scripts/collect_artifacts.py --build frida-src/build --version "$FRIDA_VERSION" \
+          python3 -I scripts/collect_artifacts.py --rewrite-elf --build frida-src/build --version "$FRIDA_VERSION" \
             --out out/compatible --source-report reports/source.json \
             --patch-report reports/compatible-post-build.json 2>&1 | tee logs/compatible-collect.log
       - name: Add explicit Zygisk initialization source feature
@@ -145,7 +157,7 @@ jobs:
           set -euo pipefail
           python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
             --feature zygisk-loader --report reports/zygisk-post-build.json 2>&1 | tee logs/zygisk-post-build.log
-          python3 -I scripts/collect_artifacts.py --build frida-src/build --version "$FRIDA_VERSION" \
+          python3 -I scripts/collect_artifacts.py --rewrite-elf --build frida-src/build --version "$FRIDA_VERSION" \
             --out out/zygisk --source-report reports/source.json \
             --patch-report reports/zygisk-post-build.json 2>&1 | tee logs/zygisk-collect.log
       - name: Build wrapper and package verified final Gadget

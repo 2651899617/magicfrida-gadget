@@ -113,8 +113,10 @@ def final_outputs(build, targets):
     return result
 
 
-def artifact_variant(kind, features):
+def artifact_variant(kind, features, rewritten=False):
     variant = '-entry-renamed' if 'agent-entrypoint-rename' in features else ''
+    if rewritten:
+        variant += '-elf-rewritten'
     if kind == 'gadget' and 'gadget-json-config' in features:
         variant += '-json-config'
     return variant
@@ -130,7 +132,7 @@ def gadget_config_lookup(kind, features):
             'source_contract': 'verified', 'runtime_lookup': 'not-tested'}
 
 
-def collect(build_dir, version, out, source_report, patch_report):
+def collect(build_dir, version, out, source_report, patch_report, rewrite_elf=False):
     manifest = json.loads((ROOT / 'versions.json').read_text(encoding='utf-8'))
     versions = [item for item in manifest['versions'] if item['version'] == version]
     if len(versions) != 1:
@@ -159,6 +161,11 @@ def collect(build_dir, version, out, source_report, patch_report):
             raise ValueError('final server and gadget outputs must be distinct files')
         final_paths.add(path)
         data = path.read_bytes()
+        original = data
+        rewrite_report = None
+        if rewrite_elf:
+            data, rewrite_report = elf.rewrite(data, kind)
+            elf.validate_rewrite_report(data, rewrite_report, kind)
         info = elf.audit(data)
         renamed_entry = 'agent-entrypoint-rename' in patches['features']
         info['agent_entrypoint'] = {
@@ -167,28 +174,35 @@ def collect(build_dir, version, out, source_report, patch_report):
             'source_contract': 'verified' if kind == 'server' else 'not-applicable',
             'final_symbol_lookup': 'not-tested' if kind == 'server' else 'not-applicable',
         }
+        if rewrite_report is not None:
+            info['elf_rewrite'] = rewrite_report
+            info['binary_modified'] = True
         if version.encode() not in data:
             raise ValueError('version string missing from final ' + kind)
-        checked[kind] = (path, data, info)
+        checked[kind] = (path, original, data, info, rewrite_report)
     if out.exists():
         raise ValueError('output directory must not exist')
     out.mkdir(parents=True)
     artifacts = {}
-    for kind, (path, data, info) in checked.items():
+    for kind, (path, original, data, info, rewrite_report) in checked.items():
         label = 'gadget-zygisk' if kind == 'gadget' and 'zygisk-loader' in patches['features'] else kind
-        variant = artifact_variant(kind, patches['features'])
+        variant = artifact_variant(kind, patches['features'], rewrite_elf)
         name = 'nianchu-' + label + variant + '-' + version + '-android-arm64' + ('.so' if kind == 'gadget' else '')
         destination = out / name
-        shutil.copyfile(path, destination)
+        if rewrite_report is None:
+            shutil.copyfile(path, destination)
+        else:
+            destination.write_bytes(data)
+            (out / (name + '.rewrite.json')).write_text(json.dumps(rewrite_report, indent=2) + '\n', encoding='utf-8')
         if kind == 'server':
             destination.chmod(0o755)
-        if destination.read_bytes() != data or path.read_bytes() != data:
+        if destination.read_bytes() != data or path.read_bytes() != original:
             raise ValueError('copy byte identity mismatch')
         artifacts[kind] = {'file': name, 'final_target': expected['targets'][kind],
                            'final_filename': path.name,
                            'gadget_config_lookup': gadget_config_lookup(kind, patches['features']), **info}
     report = {'schema': 1, 'version': version, 'source': source, 'patches': patches,
-              'artifacts': artifacts, 'binary_modified': False,
+              'artifacts': artifacts, 'binary_modified': rewrite_elf,
               'validation': {'build_outputs': 'verified', 'protocol_handshake': 'not-tested',
                              'zygisk_load': 'not-tested', 'app_detection': 'not-tested'}}
     (out / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
@@ -202,11 +216,12 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--source-report', required=True, type=Path)
     parser.add_argument('--patch-report', required=True, type=Path)
+    parser.add_argument('--rewrite-elf', action='store_true')
     args = parser.parse_args()
     try:
-        result = collect(args.build.resolve(), args.version, args.out, args.source_report, args.patch_report)
+        result = collect(args.build.resolve(), args.version, args.out, args.source_report, args.patch_report, args.rewrite_elf)
         print(json.dumps(result['artifacts'], indent=2))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, ImportError) as error:
         print('FATAL: ' + str(error), file=sys.stderr)
         return 1
     return 0

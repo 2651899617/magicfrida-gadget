@@ -1,5 +1,23 @@
 --- a/subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c
 +++ b/subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c
+@@ -220,7 +220,7 @@
+   {
+     self->disposed = TRUE;
+ 
+-    gum_exceptor_backend_detach (self);
++    /* Reference profile: POSIX exception backend was not attached. */
+ 
+     g_object_unref (self->interceptor);
+     self->interceptor = NULL;
+@@ -241,7 +241,7 @@
+   backend->handler = handler;
+   backend->handler_data = user_data;
+ 
+-  gum_exceptor_backend_attach (backend);
++  /* Reference profile: do not install POSIX exception/signal handlers. */
+ 
+   return backend;
+ }
 @@ -292,10 +292,8 @@
    {
      gum_interceptor_begin_transaction (interceptor);

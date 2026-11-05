@@ -42,7 +42,8 @@ class JavaBridgeTests(unittest.TestCase):
                 self.assertEqual((self.out / 'package' / relative).read_bytes(), (self.source / relative).read_bytes())
         for version in ('16.7.19', '17.25.2'):
             recipe = json.loads((ROOT / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
-            self.assertFalse(recipe['java_bridge']['modified'])
+            self.assertEqual(recipe['java_bridge']['profile'], 'reference-prettymethod-off')
+            self.assertEqual(recipe['java_bridge']['modified'], version.startswith('16.'))
 
     def test_source_drift_missing_and_extra_files_fail_before_output(self):
         path = self.source / 'lib/android.js'

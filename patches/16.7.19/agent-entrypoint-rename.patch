@@ -1,6 +1,6 @@
 --- a/subprojects/frida-core/src/linux/linux-host-session.vala
 +++ b/subprojects/frida-core/src/linux/linux-host-session.vala
-@@ -360,7 +360,7 @@
+@@ -362,7 +362,7 @@
  		protected override async Future<IOStream> perform_attach_to (uint pid, HashTable<string, Variant> options,
  				Cancellable? cancellable, out Object? transport) throws Error, IOError {
  			uint id;

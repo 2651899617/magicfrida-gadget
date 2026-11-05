@@ -2,7 +2,21 @@
 
 仅以 `E:/frida魔改/fridaneed/最新的frida内容/anti-frida.py` 作为该脚本的采用参考；旧副本不重复登记。用户提供的实践脚本、三套 patch 和文章均按固定源码的适用性、冲突及创建/消费者联动判断，不因使用 LIEF、字符串替换或功能裁剪的形式而整体排除。这里区分“参考已验证”“本项目源码已迁移”“本项目编译/运行已验证”。
 
-## 已落实的源码 recipe
+## 2026-11-05 参考 patch 扩展（当前工作树）
+
+用户要求按参考 patch 与最新版 anti-frida.py 实施，当前工作树已扩展默认 recipe；下文旧构建/实验记录按其注明的提交和 run 理解。
+
+- 两版 guard 已扩展为 50／55 份。server 默认目录与 agent 资源前缀使用 UUID；helper/socket/memfd、core/Gadget 初始化品牌使用 nianchu。Linux 临时目录按参考返回 `/system/lib64`。
+- `exit-monitor-off`、`signal-interposition-off`、`agent-entrypoint-rename`、`gadget-json-config` 成为默认 feature；signal 项现在包括 whole POSIX exception backend attach/detach 停用。`zygisk-loader` 仍仅供模块构建追加。
+- RPC 三个消费者通过双层 Base64 获取原 `frida:rpc` 值，线上协议值保持；Droidy/ADB 的指定 OPEN/CLSE/WRTE 分支按参考执行 break。
+- agent ELF 最终名称与 compat 查找同步；embed-agent/embed-helper 在资源编译前调用 ELF 改写器，覆盖非空兼容架构文件。两版 Gadget 文章修改继续保留。
+- `patches/rename.py` 从只读审计扩展为 LIEF 0.17.6 改写器：符号中的 frida/FRIDA、四类 rodata 字符串、参考 PATH_STRINGS 全文件等长替换；作者 libwzdnb-agent 品牌改用 libnianchu-agent。rodata 使用显式 VA 模式；原始文件偏移仅用于报告。最终重建后独立检查 GNU/SysV hash 查找与 NEEDED。
+- 全文件 `gadget` 替换会改变 Zygisk 初始化导出；最终入口由重写报告 `initialization_symbol` 记录，wrapper/collector/module 必须使用同一经校验入口。该字符串改写不是只改线程标签，也会触及 ART 解析键与 Java bridge 路径；运行行为需要单独验证。
+- 16 bundled bridge 6.3.9 增加编译前 PrettyMethod hook 删除；17 外置 7.0.13 增加独立参考 patch/bundle 脚本。与既有 direct-art-gc profile 分开记录，不能混用报告。
+
+以上为本轮未提交工作树的实现状态。完整离线回归 183 项通过、2 项因 Windows 符号链接权限跳过；ELF 专项 7/7、artifact 30/30、workflow 8/8、补丁组合 32/32、Gadget 9/9。16/17 的普通及 Zygisk Gadget 四种真实 ELF 均完成内存 rewrite/report 校验，原始产物未改。GNU hash 显式重建不重排 dynsym；只报告 PT_DYNAMIC 实际启用的 hash 表，嵌入 ELF 连同 header/program/section table 均受外层替换隔离保护。collector/module 使用报告驱动的初始化入口，CI checks/build 各使用固定 LIEF 0.17.6 独立 venv。旧 Actions run 41951726835 不包含这些新增修改；真实 Android 编译、真实 npm bridge 构建与 Java/GC/异常运行验证尚未执行。
+
+## 先前源码 recipe 与构建记录
 
 | 修改点 | 16.7.19 | 17.25.2 | 联动及证据范围 |
 |---|---|---|---|
@@ -27,7 +41,7 @@
 | feature | 来源及实现 | 验证及边界 |
 |---|---|---|
 | `agent-entrypoint-rename` | 从旧 patch/新版脚本的入口点迁移，统一为自有 `nianchu_agent_main`；Vala `[CCode(cname=...)]`、JNI/glue、各平台导出、注入调用、AgentContainer 和 labrat/test 同步 | 16／17 分别覆盖 24／26 份入口源码；默认保留旧入口；源码组合重放已验证，CCode 编译及最终 embedded agent lookup 未验证 |
-| `zygisk-loader` | Android 不自动初始化，增加独立 `nianchu_gadget_init`，由模块显式传入配置 | 普通自动 Gadget 不启用；该入口不是 agent 入口；已有 CI 的旧基线构建证据不可替代新增源码编译 |
+| `zygisk-loader` | Android 不自动初始化，增加独立 `nianchu_gadget_init`，由模块显式传入配置 | 普通自动 Gadget 不启用；该入口不是 agent 入口；Actions run 41951726835 已实际编译 compatible 与 Zygisk 两个 profile，设备加载仍未验证 |
 | `exit-monitor-off` | 构造函数中的 Windows/POSIX attach 成组移除，其余退出逻辑保留 | 未验证有序退出功能代价；默认/CI 不启用 |
 | `signal-interposition-off` | 仅去 signal/sigaction replace 和对应 revert，保留异常 handler 安装与清理 | 不等于 whole exceptor backend 禁用；未验证异常功能代价；默认/CI 不启用 |
 | `gadget-json-config` | 采用 Gadget 文章的 JSON 配置思路，但保留 `.config` 优先、增加 `.json` 再回退 `.config.so`；只改 Android Gadget load_config block | 显式 config_data 优先、脚本 `.config`、非 Android/framework 及错误处理保留；产物/zip 带 `-json-config-`，不宣称 server 新配置行为；真实文件查找未测 |
@@ -73,7 +87,7 @@
 - Gadget 清单见 `patches/gadget-files.json`，每版 8 份新增固定源码。collector 的 `gadget_config_lookup` 仅为经过 pinned recipe/hash 核对的源码约定，`runtime_lookup=not-tested`；module builder 核同名最终文件、完整约定和 feature 变体，不能据此宣称最终 SONAME、真实动态 lookup 或 Android 加载通过。
 
 - 两版原有监听 `Environment.set_thread_name()` 在非 Darwin 的 glue 中为空实现，仅 i/macOS 实际调用 `pthread_setname_np`。TCP/Unix 标签已改源码并同步 Fruity，但不宣称 Android 因此产生新 OS 线程名；Android worker 的 `g_thread_new("nianchu-gadget",...)` 是另一既有路径。15 字节上限检查只是标签长度兼容模型，未新增 Android 命名实现。
-- Gadget 专项 9 项、产物专项 29 项通过；完整回归 116 项、零 skip，每版 32 种 feature 集及正反顺序零 fuzz/零 offset 重放通过。配置路径为限制性源码翻译模型、模块 zip 使用临时 synthetic ELF/编译器替身，不是 Vala/Android/真实 wrapper 构建。首轮 Gadget 排序符号断言失败已按两版上游差异修正，补丁未改排序符号，修正后完整重跑通过。
+- Gadget 专项 9 项、产物专项 29 项通过；完整回归 116 项、零 skip，每版 32 种 feature 集及正反顺序零 fuzz/零 offset 重放通过。配置路径为限制性源码翻译模型、模块 zip 单元测试使用临时 synthetic ELF/编译器替身，不是这些模型测试本身进行了 Vala/Android/真实 wrapper 构建。另有 Actions run 41951726835 对两版 compatible 与 zygisk-loader profile 的真实 Android arm64 构建证据；配置路径和设备运行仍未验证。首轮 Gadget 排序符号断言失败已按两版上游差异修正，补丁未改排序符号，修正后完整重跑通过。
 
 ## Java bridge 与依赖来源
 
@@ -93,4 +107,4 @@
 
 Zygisk API 5 header SHA-256：`f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28`，保留上游许可证。xiaojia config 样本只读，hash `5eb188865bfcc46b31fcb6e12699ecb8a76b61f3872cac3809c6f20cfb8bfc36`；字段/字符串存在不能证明私有摘链执行路径。
 
-本轮无 ADB/手机/KPM 操作，无 system_server 注入、系统目录更改、清数据/重装、用户 Python/frida.exe 修改，也未自动 commit/push/dispatch。默认 solist/r_debug 摘链、resetprop、全局信号过滤和开机 APK 安装不纳入。当前 KPM 仅观察 foundation，不宣称通用隐藏完成或所有 App 免检测。
+本轮源码已提交并推送至 `fix/build-integrity`（`be895fa4f4e074c92c942c5e73df84129ffc7dc5`），Actions run 41951726835 构建成功；本次构建未操作 ADB/手机/KPM，也未修改系统 Python/frida.exe。默认 solist/r_debug 摘链、resetprop、全局信号过滤和开机 APK 安装不纳入。当前 KPM 仅观察 foundation，不宣称通用隐藏完成或所有 App 免检测。

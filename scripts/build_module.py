@@ -38,7 +38,7 @@ def payload_from_manifest(path):
         raise ValueError('module requires zygisk-loader source feature')
     artifact = data['artifacts']['gadget']
     name = artifact['file']
-    variant = collector.artifact_variant('gadget', data['patches']['features'])
+    variant = collector.artifact_variant('gadget', data['patches']['features'], data.get('binary_modified') is True)
     if Path(name).name != name or name != 'nianchu-gadget-zygisk' + variant + '-' + version + '-android-arm64.so':
         raise ValueError('invalid final Gadget name')
     payload = path.parent / name
@@ -52,7 +52,18 @@ def payload_from_manifest(path):
         raise ValueError('not a final Gadget target/filename')
     if artifact.get('gadget_config_lookup') != collector.gadget_config_lookup('gadget', data['patches']['features']):
         raise ValueError('Gadget config lookup contract mismatch')
-    if version.encode() not in binary or data.get('binary_modified') is not False:
+    rewritten = data.get('binary_modified')
+    if type(rewritten) is not bool or artifact.get('binary_modified') is not rewritten:
+        raise ValueError('invalid Gadget modification contract')
+    rewrite = artifact.get('elf_rewrite')
+    if rewritten:
+        collector.elf.validate_rewrite_report(binary, rewrite, 'gadget')
+        entry = rewrite.get('initialization_symbol')
+        if not isinstance(entry, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', entry):
+            raise ValueError('invalid Gadget initialization symbol')
+    elif rewrite is not None:
+        raise ValueError('unexpected ELF rewrite report')
+    if version.encode() not in binary:
         raise ValueError('invalid Gadget manifest/version')
     return payload, binary, data
 
@@ -74,6 +85,16 @@ def build(ndk, out, manifest=None):
         if revision[1] != expected_ndk:
             raise ValueError('wrapper NDK does not match selected Frida version')
     out.mkdir(parents=True)
+    source = ROOT / 'module/src/module.cpp'
+    generated_source = out / 'module.cpp'
+    source_text = source.read_text(encoding='utf-8')
+    entry = (provenance['artifacts']['gadget']['elf_rewrite']['initialization_symbol']
+             if provenance and provenance['binary_modified'] else 'nianchu_gadget_init')
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', entry):
+        raise ValueError('invalid Gadget initialization symbol')
+    if source_text.count('"nianchu_gadget_init"') != 1:
+        raise ValueError('unexpected wrapper initialization lookup source')
+    generated_source.write_text(source_text.replace('"nianchu_gadget_init"', '"' + entry + '"'), encoding='utf-8')
     header = out / 'payload.hpp'
     digest = hashlib.sha256(binary).digest()
     header.write_text('#pragma once\n#include <stdint.h>\nstatic const uint64_t NIANCHU_PAYLOAD_SIZE = ' +
@@ -84,7 +105,7 @@ def build(ndk, out, manifest=None):
     run(compiler, '--target=aarch64-linux-android26', '-std=c++17', '-shared', '-fPIC', '-O2',
         '-fno-exceptions', '-fno-rtti', '-fno-threadsafe-statics', '-nostdlib++', '-fvisibility=hidden', '-Wall', '-Wextra', '-Werror',
         '-Wl,--no-undefined', '-Wl,-z,relro,-z,now', '-I' + str(ROOT / 'module/include'),
-        '-I' + str(out), ROOT / 'module/src/module.cpp', '-llog', '-ldl', '-o', library)
+        '-I' + str(out), generated_source, '-llog', '-ldl', '-o', library)
     readelf = tools / ('llvm-readelf' + suffix)
     symbols = run(readelf, '--dyn-syms', '--wide', library)
     if not re.search(r'\bGLOBAL\s+DEFAULT\s+\d+\s+zygisk_module_entry\s*$', symbols, re.M):
@@ -95,18 +116,19 @@ def build(ndk, out, manifest=None):
         raise ValueError('unexpected native dependency: ' + repr(needed))
     if payload:
         payload_symbols = run(readelf, '--dyn-syms', '--wide', payload)
-        if not re.search(r'\bGLOBAL\s+DEFAULT\s+\d+\s+nianchu_gadget_init(?:@@?\S+)?\s*$', payload_symbols, re.M):
+        if not re.search(r'\bGLOBAL\s+DEFAULT\s+\d+\s+' + re.escape(entry) + r'(?:@@?\S+)?\s*$', payload_symbols, re.M):
             raise ValueError('final Gadget explicit initialization entry missing')
     report = {'schema': 1, 'compile_only': manifest is None, 'ndk_revision': revision[1],
               'api': 5, 'android_min_api': 26, 'dependencies': needed,
               'wrapper_sha256': hashlib.sha256(library.read_bytes()).hexdigest(),
               'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in sorted((ROOT / 'module').rglob('*')) if p.is_file()},
-              'gadget_manifest': provenance, 'zygisk_load': 'not-tested', 'app_detection': 'not-tested'}
+              'compiled_source_sha256': hashlib.sha256(generated_source.read_bytes()).hexdigest(),
+              'initialization_symbol': entry, 'gadget_manifest': provenance, 'zygisk_load': 'not-tested', 'app_detection': 'not-tested'}
     (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     if payload:
         version = provenance['version']
-        variant = collector.artifact_variant('gadget', provenance['patches']['features'])
+        variant = collector.artifact_variant('gadget', provenance['patches']['features'], provenance['binary_modified'])
         name = out / ('nianchu-zygisk' + variant + '-' + version + '-android-arm64.zip')
         with zipfile.ZipFile(name, 'w', zipfile.ZIP_DEFLATED) as archive:
             for source, destination in ((library, 'zygisk/arm64-v8a.so'),

@@ -1,0 +1,21 @@
+{
+  "16.7.19": {
+    "lib/base/rpc.vala": "fa73eccc6a507919b06bb8ed926e6427f4d57227226b7f1ed8fe91cd4eb817a9",
+    "src/droidy/droidy-client.vala": "b825cc53beeec25adb2f04a35febee8f3198634bf2c469df3cce01a0f2fe996a",
+    "src/droidy/droidy-host-session.vala": "e4bdd7d585f68f9559a71cf55b1fc5c965879930d20ae817461cf1efda434613",
+    "src/embed-agent.py": "4673c9270243797f6a84589d58a4dec3a274f2b05b428e8ccec577733cb1b797",
+    "src/embed-helper.py": "aa4203a0b56791d2d4d62ddfd6abb4f84063acaa79d91c6196e3bfec7e060c4e",
+    "src/freebsd/binjector-glue.c": "adfd5cb3d3dc4f184220e140380e6f4f03c7b2dc806bb602e9bc389c596f9013",
+    "src/linux/system-linux.c": "43429e5f0588ac65577cfe201c70eab2cbc5f960dad7909cf7161248e0a5a999"
+  },
+  "17.25.2": {
+    "lib/base/linux.vala": "54097763504062c34ef09788adb3b9bb3ddc4cbde671f9db95c977773eb16ab9",
+    "lib/base/rpc.vala": "9c9294349b0ab2efad9a9b2819e62e596429b4a5a29ce2699135ef309ef674c8",
+    "src/adb.vala": "92f54e19ca1313ccf87d55eebe3b819f7226465680c8037b80685b820c9b8c05",
+    "src/android-helper/client.vala": "7bc718dfeb76f1b7f9049ad70adc17ecf704a447660904bfd457d25c9fbcaac7",
+    "src/embed-agent.py": "2b1dd7b2adc78fe082410ec45ef8dd29c296b6c5c49e17e6b92250631b0d6d23",
+    "src/embed-helper.py": "fd7d9588d933e836d8036a1f4c5a485596732b58b1d55b4995cf429dabae4b90",
+    "src/freebsd/binjector-glue.c": "2d0e30b6a248f62cba1fc36fac408875afbc0c9aeb5806ff84fd1bc635c2988b",
+    "src/linux/system-linux.c": "9c6b93e5fb54d64e9b3fd43c2294ae3913f3b6c10488bfa29a968d4ea06edc0e"
+  }
+}

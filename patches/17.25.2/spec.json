@@ -12,10 +12,17 @@
     "agent-entrypoint-rename",
     "gadget-json-config"
   ],
+  "default_features": [
+    "exit-monitor-off",
+    "signal-interposition-off",
+    "agent-entrypoint-rename",
+    "gadget-json-config"
+  ],
   "java_bridge": {
     "mode": "external-client-supplied",
     "modified": false,
-    "reason": "ART/GC/JDWP removal needs functional replacement and runtime tests"
+    "profile": "reference-prettymethod-off",
+    "reason": "16 bundles the reference bridge patch; 17 publishes a separate patched client bundle"
   },
   "files": [
     {
@@ -23,8 +30,13 @@
       "upstream_sha256": "c1b94a5bc40be0619adb88592e728bd1da66d8d8f0ecaf3b9e126e46d9e3dd46",
       "edits": [
         {
-          "old": "\"re.frida.server\"",
-          "new": "\"nianchu.server\"",
+          "old": "private const string DEFAULT_DIRECTORY = \"re.frida.server\";",
+          "new": "private static string DEFAULT_DIRECTORY;",
+          "count": 1
+        },
+        {
+          "old": "\tprivate static int main (string[] args) {\n",
+          "new": "\tprivate static int main (string[] args) {\n\t\tDEFAULT_DIRECTORY = GLib.Uuid.string_random ();\n",
           "count": 1
         }
       ],
@@ -35,19 +47,39 @@
       "upstream_sha256": "9c38b39992536d36ec6919f687a17024a04e93afb61ad31db4fb688cb873b263",
       "edits": [
         {
-          "old": "\"frida-agent-<arch>.so\"",
-          "new": "\"nianchu-agent-<arch>.so\"",
+          "old": "private AgentDescriptor? agent;",
+          "new": "private AgentDescriptor? agent;\n\t\tprivate string agent_prefix;",
           "count": 1
         },
         {
-          "old": "\"frida-agent-arm.so\"",
-          "new": "\"nianchu-agent-arm.so\"",
-          "count": 2
+          "old": "agent = new AgentDescriptor (PathTemplate (\"frida-agent-<arch>.so\"),",
+          "new": "agent_prefix = GLib.Uuid.string_random ();\n\t\t\tagent = new AgentDescriptor (PathTemplate (agent_prefix + \"-<arch>.so\"),",
+          "count": 1
         },
         {
-          "old": "\"frida-agent-arm64.so\"",
-          "new": "\"nianchu-agent-arm64.so\"",
-          "count": 2
+          "old": "new AgentResource (\"frida-agent-arm.so\",",
+          "new": "new AgentResource (agent_prefix + \"-arm.so\",",
+          "count": 1
+        },
+        {
+          "old": "new AgentResource (\"frida-agent-arm64.so\",",
+          "new": "new AgentResource (agent_prefix + \"-arm64.so\",",
+          "count": 1
+        },
+        {
+          "old": "unowned string name;\n\t\t\tswitch (cpu_type_from_pid (pid))",
+          "new": "string name;\n\t\t\tswitch (cpu_type_from_pid (pid))",
+          "count": 1
+        },
+        {
+          "old": "name = \"frida-agent-arm.so\";",
+          "new": "name = agent_prefix + \"-arm.so\";",
+          "count": 1
+        },
+        {
+          "old": "name = \"frida-agent-arm64.so\";",
+          "new": "name = agent_prefix + \"-arm64.so\";",
+          "count": 1
         },
         {
           "old": "\"/data/local/tmp/frida-helper-\"",
@@ -87,6 +119,11 @@
         {
           "old": "#include \"frida-gadget.h\"",
           "new": "#include \"nianchu-gadget.h\"",
+          "count": 1
+        },
+        {
+          "old": "  gum_script_backend_get_type (); /* Warm up */",
+          "new": "  g_set_prgname (\"nianchu\");\n\n  gum_script_backend_get_type (); /* Warm up */",
           "count": 1
         }
       ],
@@ -132,6 +169,16 @@
       "edits": [],
       "optional": {
         "signal-interposition-off": [
+          {
+            "old": "    gum_exceptor_backend_detach (self);",
+            "new": "    /* Reference profile: POSIX exception backend was not attached. */",
+            "count": 1
+          },
+          {
+            "old": "  gum_exceptor_backend_attach (backend);",
+            "new": "  /* Reference profile: do not install POSIX exception/signal handlers. */",
+            "count": 1
+          },
           {
             "old": "gum_interceptor_replace (interceptor, gum_original_signal,\n        gum_exceptor_backend_replacement_signal, NULL, &options);",
             "new": "/* Experimental: signal interposition disabled. */",
@@ -603,6 +650,11 @@
           "old": "g_thread_new (\"frida-main-loop\",",
           "new": "g_thread_new (\"nianchu-main\",",
           "count": 1
+        },
+        {
+          "old": "\n    if (runtime == FRIDA_RUNTIME_OTHER)\n",
+          "new": "\n    g_set_prgname (\"nianchu\");\n\n    if (runtime == FRIDA_RUNTIME_OTHER)\n",
+          "count": 1
         }
       ],
       "optional": {}
@@ -679,6 +731,11 @@
           "old": "gadget_name = 'frida-gadget' + shlib_suffix",
           "new": "gadget_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix",
           "count": 1
+        },
+        {
+          "old": "agent_name = 'frida-agent' + shlib_suffix",
+          "new": "agent_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-agent' : 'nianchu-agent') + shlib_suffix",
+          "count": 1
         }
       ],
       "optional": {}
@@ -690,6 +747,11 @@
         {
           "old": "GADGET_FILE_ELF = Path(\"lib\") / \"gadget\" / \"frida-gadget.so\"",
           "new": "GADGET_FILE_ELF = Path(\"lib\") / \"gadget\" / \"nianchu-gadget.so\"",
+          "count": 1
+        },
+        {
+          "old": "AGENT_FILE_ELF = Path(\"lib\") / \"agent\" / \"frida-agent.so\"",
+          "new": "AGENT_FILE_ELF = Path(\"lib\") / \"agent\" / \"nianchu-agent.so\"",
           "count": 1
         }
       ],
@@ -726,6 +788,117 @@
         {
           "old": "/^frida-gadget-tcp-(\\d+)$/.match",
           "new": "/^(?:frida-gadget-tcp-|nianchu-t)(\\d+)$/.match",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/base/linux.vala",
+      "upstream_sha256": "54097763504062c34ef09788adb3b9bb3ddc4cbde671f9db95c977773eb16ab9",
+      "edits": [
+        {
+          "old": "return Linux.syscall (LinuxSyscall.MEMFD_CREATE, name, flags);",
+          "new": "return Linux.syscall (LinuxSyscall.MEMFD_CREATE, \"nianchu-cache\", flags);",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/base/rpc.vala",
+      "upstream_sha256": "9c9294349b0ab2efad9a9b2819e62e596429b4a5a29ce2699135ef309ef674c8",
+      "edits": [
+        {
+          "old": "\t\tprivate Gee.HashMap<string, PendingResponse> pending_responses",
+          "new": "\t\tprivate string get_rpc_marker (bool quoted = false) {\n\t\t\tstring marker = (string) GLib.Base64.decode ((string) GLib.Base64.decode (\"Wm5KcFpHRTZjbkJq\"));\n\t\t\treturn quoted ? \"\\\"\" + marker + \"\\\"\" : marker;\n\t\t}\n\n\t\tprivate Gee.HashMap<string, PendingResponse> pending_responses",
+          "count": 1
+        },
+        {
+          "old": ".add_string_value (\"frida:rpc\")",
+          "new": ".add_string_value (get_rpc_marker ())",
+          "count": 1
+        },
+        {
+          "old": "json.index_of (\"\\\"frida:rpc\\\"\")",
+          "new": "json.index_of (get_rpc_marker (true))",
+          "count": 1
+        },
+        {
+          "old": "type != \"frida:rpc\"",
+          "new": "type != get_rpc_marker ()",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/adb.vala",
+      "upstream_sha256": "92f54e19ca1313ccf87d55eebe3b819f7226465680c8037b80685b820c9b8c05",
+      "edits": [
+        {
+          "old": "throw new Error.PROTOCOL (\"Unexpected command\");",
+          "new": "break; /* Ignore unsolicited OPEN/CLSE/WRTE as in the reference patch. */",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/android-helper/client.vala",
+      "upstream_sha256": "7bc718dfeb76f1b7f9049ad70adc17ecf704a447660904bfd457d25c9fbcaac7",
+      "edits": [
+        {
+          "old": "\"/data/local/tmp/frida-helper-\"",
+          "new": "\"/data/local/tmp/nianchu-helper-\"",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/embed-agent.py",
+      "upstream_sha256": "2b1dd7b2adc78fe082410ec45ef8dd29c296b6c5c49e17e6b92250631b0d6d23",
+      "edits": [
+        {
+          "old": "    subprocess.run([\n        resource_compiler,",
+          "new": "    if host_os in {\"linux\", \"android\"}:\n        rewriter = __import__(\"os\").environ[\"NIANCHU_ELF_REWRITER\"]\n        for asset in embedded_assets:\n            if asset.stat().st_size == 0:\n                continue\n            subprocess.run([sys.executable, \"-I\", rewriter, str(asset),\n                            \"--rewrite\", \"--kind\", \"agent\",\n                            \"--report\", str(asset) + \".rewrite.json\"], check=True)\n\n    subprocess.run([\n        resource_compiler,",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/embed-helper.py",
+      "upstream_sha256": "fd7d9588d933e836d8036a1f4c5a485596732b58b1d55b4995cf429dabae4b90",
+      "edits": [
+        {
+          "old": "    subprocess.run([\n        resource_compiler,",
+          "new": "    if host_os in {\"linux\", \"android\"}:\n        rewriter = __import__(\"os\").environ[\"NIANCHU_ELF_REWRITER\"]\n        for asset in embedded_assets:\n            if asset.stat().st_size == 0:\n                continue\n            subprocess.run([sys.executable, \"-I\", rewriter, str(asset),\n                            \"--rewrite\", \"--kind\", \"helper\",\n                            \"--report\", str(asset) + \".rewrite.json\"], check=True)\n\n    subprocess.run([\n        resource_compiler,",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/freebsd/binjector-glue.c",
+      "upstream_sha256": "2d0e30b6a248f62cba1fc36fac408875afbc0c9aeb5806ff84fd1bc635c2988b",
+      "edits": [
+        {
+          "old": "g_strdup_printf (\"%s/binjector-%u\", self->temp_path, self->id)",
+          "new": "g_strdup_printf (\"%s/%p%u\", self->temp_path, self, self->id)",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/linux/system-linux.c",
+      "upstream_sha256": "9c6b93e5fb54d64e9b3fd43c2294ae3913f3b6c10488bfa29a968d4ea06edc0e",
+      "edits": [
+        {
+          "old": "return g_strdup (\"/data/local/tmp\");",
+          "new": "return g_strdup (\"/system/lib64\");",
           "count": 1
         }
       ],

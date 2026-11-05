@@ -5,38 +5,59 @@
  	private static Application application;
  
 -	private const string DEFAULT_DIRECTORY = "re.frida.server";
-+	private const string DEFAULT_DIRECTORY = "nianchu.server";
++	private static string DEFAULT_DIRECTORY;
  	private static bool output_version = false;
  	private static string? device_id = null;
  	private static string? listen_address = null;
+@@ -52,6 +52,7 @@
+ 	};
+ 
+ 	private static int main (string[] args) {
++		DEFAULT_DIRECTORY = GLib.Uuid.string_random ();
+ 		Environment.init ();
+ 
+ #if DARWIN
 --- a/subprojects/frida-core/src/linux/linux-host-session.vala
 +++ b/subprojects/frida-core/src/linux/linux-host-session.vala
-@@ -62,12 +62,12 @@
+@@ -31,6 +31,7 @@
+ 		private AgentContainer system_session_container;
+ 
+ 		private AgentDescriptor? agent;
++		private string agent_prefix;
+ 
+ #if ANDROID
+ 		private RoboLauncher robo_launcher;
+@@ -62,12 +63,13 @@
  			var blob64 = Frida.Data.Agent.get_frida_agent_64_so_blob ();
  			var emulated_arm = Frida.Data.Agent.get_frida_agent_arm_so_blob ();
  			var emulated_arm64 = Frida.Data.Agent.get_frida_agent_arm64_so_blob ();
 -			agent = new AgentDescriptor (PathTemplate ("frida-agent-<arch>.so"),
-+			agent = new AgentDescriptor (PathTemplate ("nianchu-agent-<arch>.so"),
++			agent_prefix = GLib.Uuid.string_random ();
++			agent = new AgentDescriptor (PathTemplate (agent_prefix + "-<arch>.so"),
  				new Bytes.static (blob32.data),
  				new Bytes.static (blob64.data),
  				new AgentResource[] {
 -					new AgentResource ("frida-agent-arm.so", new Bytes.static (emulated_arm.data), tempdir),
 -					new AgentResource ("frida-agent-arm64.so", new Bytes.static (emulated_arm64.data), tempdir),
-+					new AgentResource ("nianchu-agent-arm.so", new Bytes.static (emulated_arm.data), tempdir),
-+					new AgentResource ("nianchu-agent-arm64.so", new Bytes.static (emulated_arm64.data), tempdir),
++					new AgentResource (agent_prefix + "-arm.so", new Bytes.static (emulated_arm.data), tempdir),
++					new AgentResource (agent_prefix + "-arm64.so", new Bytes.static (emulated_arm64.data), tempdir),
  				},
  				AgentMode.INSTANCED,
  				tempdir);
-@@ -385,10 +385,10 @@
- 			unowned string name;
+@@ -382,13 +384,13 @@
+ 		}
+ 
+ 		protected override string? get_emulated_agent_path (uint pid) throws Error {
+-			unowned string name;
++			string name;
  			switch (cpu_type_from_pid (pid)) {
  				case Gum.CpuType.IA32:
 -					name = "frida-agent-arm.so";
-+					name = "nianchu-agent-arm.so";
++					name = agent_prefix + "-arm.so";
  					break;
  				case Gum.CpuType.AMD64:
 -					name = "frida-agent-arm64.so";
-+					name = "nianchu-agent-arm64.so";
++					name = agent_prefix + "-arm64.so";
  					break;
  				default:
  					throw new Error.NOT_SUPPORTED ("Emulated realm is not supported on this architecture");
@@ -48,7 +69,16 @@
  
  #include "frida-base.h"
  #include "frida-payload.h"
-@@ -106,7 +106,7 @@
+@@ -93,6 +93,8 @@
+   g_io_module_openssl_register ();
+ #endif
+ 
++  g_set_prgname ("nianchu");
++
+   gum_script_backend_get_type (); /* Warm up */
+   frida_error_quark (); /* Initialize early so GDBus will pick it up */
+ 
+@@ -106,7 +108,7 @@
  
    worker_context = g_main_context_ref (g_main_context_default ());
    worker_loop = g_main_loop_new (worker_context, FALSE);
@@ -68,6 +98,19 @@
          (GThreadFunc) gum_script_scheduler_run_js_loop, self);
    }
  }
+--- a/subprojects/frida-gum/bindings/gumjs/generate-runtime.py
++++ b/subprojects/frida-gum/bindings/gumjs/generate-runtime.py
+@@ -56,6 +56,10 @@
+                        capture_output=True,
+                        cwd=priv_dir,
+                        check=True)
++
++    subprocess.run([sys.executable, "-I", os.environ["NIANCHU_BRIDGE_PATCHER"],
++                    "--source", str(priv_dir / "node_modules" / "frida-java-bridge"),
++                    "--version", "6.3.9", "--report", str(priv_dir / "nianchu-bridge-report.json")], check=True)
+ 
+     runtime_reldir = Path("runtime")
+     runtime_srcdir = input_dir / runtime_reldir
 --- a/subprojects/frida-core/src/linux/frida-helper-process.vala
 +++ b/subprojects/frida-core/src/linux/frida-helper-process.vala
 @@ -321,7 +321,7 @@
@@ -104,6 +147,15 @@
  		}
  
  		private Future<RemoteAgent> establish_connection (LoaderLaunch launch, InjectSpec spec, BootstrapResult bres,
+@@ -3271,7 +3271,7 @@
+ 		}
+ 
+ 		private int memfd_create (string name, uint flags) {
+-			return Linux.syscall (SysCall.memfd_create, name, flags);
++			return Linux.syscall (SysCall.memfd_create, "nianchu-cache", flags);
+ 		}
+ 	}
+ 
 --- a/subprojects/frida-gum/gum/gum.c
 +++ b/subprojects/frida-gum/gum/gum.c
 @@ -302,7 +302,7 @@
@@ -117,7 +169,13 @@
    gum_libdl_prevent_unload ();
 --- a/subprojects/frida-core/src/frida-glue.c
 +++ b/subprojects/frida-core/src/frida-glue.c
-@@ -44,7 +44,7 @@
+@@ -40,11 +40,13 @@
+     g_io_module_openssl_register ();
+ #endif
+ 
++    g_set_prgname ("nianchu");
++
+     if (runtime == FRIDA_RUNTIME_OTHER)
      {
        main_context = g_main_context_ref (g_main_context_default ());
        main_loop = g_main_loop_new (main_context, FALSE);
@@ -183,18 +241,26 @@
  #include <objc/runtime.h>
 --- a/subprojects/frida-core/meson.build
 +++ b/subprojects/frida-core/meson.build
-@@ -201,7 +201,7 @@
+@@ -200,8 +200,8 @@
+ endif
  
  helper_name = 'frida-helper' + exe_suffix
- agent_name = 'frida-agent' + shlib_suffix
+-agent_name = 'frida-agent' + shlib_suffix
 -gadget_name = 'frida-gadget' + shlib_suffix
++agent_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-agent' : 'nianchu-agent') + shlib_suffix
 +gadget_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix
  
  root_asset_dir = get_option('libdir') / 'frida'
  if host_os_family == 'darwin'
 --- a/subprojects/frida-core/compat/build.py
 +++ b/subprojects/frida-core/compat/build.py
-@@ -644,7 +644,7 @@
+@@ -639,12 +639,12 @@
+ AGENT_TARGET = "frida-agent"
+ AGENT_FILE_WINDOWS = Path("lib") / "agent" / "frida-agent.dll"
+ AGENT_FILE_DARWIN = Path("lib") / "agent" / "frida-agent.dylib"
+-AGENT_FILE_ELF = Path("lib") / "agent" / "frida-agent.so"
++AGENT_FILE_ELF = Path("lib") / "agent" / "nianchu-agent.so"
+ 
  GADGET_TARGET = "frida-gadget"
  GADGET_FILE_WINDOWS = Path("lib") / "gadget" / "frida-gadget.dll"
  GADGET_FILE_DARWIN = Path("lib") / "gadget" / "frida-gadget.dylib"
@@ -239,3 +305,124 @@
  					string raw_port = info.fetch (1);
  
  					try {
+--- a/subprojects/frida-core/lib/base/rpc.vala
++++ b/subprojects/frida-core/lib/base/rpc.vala
+@@ -3,6 +3,11 @@
+ 		public weak RpcPeer peer {
+ 			get;
+ 			construct;
++		}
++
++		private string get_rpc_marker (bool quoted = false) {
++			string marker = (string) GLib.Base64.decode ((string) GLib.Base64.decode ("Wm5KcFpHRTZjbkJq"));
++			return quoted ? "\"" + marker + "\"" : marker;
+ 		}
+ 
+ 		private Gee.HashMap<string, PendingResponse> pending_responses = new Gee.HashMap<string, PendingResponse> ();
+@@ -17,7 +22,7 @@
+ 			var request = new Json.Builder ();
+ 			request
+ 				.begin_array ()
+-				.add_string_value ("frida:rpc")
++				.add_string_value (get_rpc_marker ())
+ 				.add_string_value (request_id)
+ 				.add_string_value ("call")
+ 				.add_string_value (method)
+@@ -70,7 +75,7 @@
+ 		}
+ 
+ 		public bool try_handle_message (string json) {
+-			if (json.index_of ("\"frida:rpc\"") == -1)
++			if (json.index_of (get_rpc_marker (true)) == -1)
+ 				return false;
+ 
+ 			var parser = new Json.Parser ();
+@@ -99,7 +104,7 @@
+ 				return false;
+ 
+ 			string? type = rpc_message.get_element (0).get_string ();
+-			if (type == null || type != "frida:rpc")
++			if (type == null || type != get_rpc_marker ())
+ 				return false;
+ 
+ 			var request_id_value = rpc_message.get_element (1);
+--- a/subprojects/frida-core/src/droidy/droidy-client.vala
++++ b/subprojects/frida-core/src/droidy/droidy-client.vala
+@@ -1015,7 +1015,7 @@
+ 						case "OPEN":
+ 						case "CLSE":
+ 						case "WRTE":
+-							throw new Error.PROTOCOL ("Unexpected command");
++							break; /* Ignore unsolicited OPEN/CLSE/WRTE as in the reference patch. */
+ 
+ 						default:
+ 							var length = parse_length (command_or_length);
+--- a/subprojects/frida-core/src/droidy/droidy-host-session.vala
++++ b/subprojects/frida-core/src/droidy/droidy-host-session.vala
+@@ -1213,7 +1213,7 @@
+ 			try {
+ 				string device_serial = device_details.serial;
+ 				string instance_id = Uuid.string_random ().replace ("-", "");
+-				string helper_path = "/data/local/tmp/frida-helper-" + instance_id + ".dex";
++				string helper_path = "/data/local/tmp/nianchu-helper-" + instance_id + ".dex";
+ 
+ 				var helper_dex = new MemoryInputStream.from_bytes (new Bytes.static (HELPER_DEX));
+ 
+--- a/subprojects/frida-core/src/embed-agent.py
++++ b/subprojects/frida-core/src/embed-agent.py
+@@ -88,6 +88,15 @@
+         print("Unsupported OS", file=sys.stderr)
+         sys.exit(1)
+ 
++    if host_os in {"linux", "android"}:
++        rewriter = __import__("os").environ["NIANCHU_ELF_REWRITER"]
++        for asset in embedded_assets:
++            if asset.stat().st_size == 0:
++                continue
++            subprocess.run([sys.executable, "-I", rewriter, str(asset),
++                            "--rewrite", "--kind", "agent",
++                            "--report", str(asset) + ".rewrite.json"], check=True)
++
+     subprocess.run([
+         resource_compiler,
+         f"--toolchain={host_toolchain}",
+--- a/subprojects/frida-core/src/embed-helper.py
++++ b/subprojects/frida-core/src/embed-helper.py
+@@ -66,6 +66,15 @@
+ 
+         embedded_assets += [embedded_helper_modern, embedded_helper_legacy]
+ 
++    if host_os in {"linux", "android"}:
++        rewriter = __import__("os").environ["NIANCHU_ELF_REWRITER"]
++        for asset in embedded_assets:
++            if asset.stat().st_size == 0:
++                continue
++            subprocess.run([sys.executable, "-I", rewriter, str(asset),
++                            "--rewrite", "--kind", "helper",
++                            "--report", str(asset) + ".rewrite.json"], check=True)
++
+     subprocess.run([
+         resource_compiler,
+         f"--toolchain={host_toolchain}",
+--- a/subprojects/frida-core/src/freebsd/binjector-glue.c
++++ b/subprojects/frida-core/src/freebsd/binjector-glue.c
+@@ -805,7 +805,7 @@
+ {
+   const int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+ 
+-  self->fifo_path = g_strdup_printf ("%s/binjector-%u", self->temp_path, self->id);
++  self->fifo_path = g_strdup_printf ("%s/%p%u", self->temp_path, self, self->id);
+ 
+   mkfifo (self->fifo_path, mode);
+   chmod (self->fifo_path, mode);
+--- a/subprojects/frida-core/src/linux/system-linux.c
++++ b/subprojects/frida-core/src/linux/system-linux.c
+@@ -158,7 +158,7 @@
+ 
+ #ifdef HAVE_ANDROID
+   if (getuid () == 0)
+-    return g_strdup ("/data/local/tmp");
++    return g_strdup ("/system/lib64");
+ #endif
+ 
+   tmp_dir = g_get_tmp_dir ();

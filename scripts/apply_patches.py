@@ -26,15 +26,30 @@ def transform(data, edits):
     return text.encode('utf-8')
 
 
-def prepare(source, version, features=()):
-    if version not in VERSIONS:
-        raise ValueError('unsupported version: ' + version)
-    spec = json.loads((ROOT / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
+def selected_features(spec, features=()):
     if len(features) != len(set(features)):
         raise ValueError('duplicate features')
     unknown = set(features) - set(spec['features'])
     if unknown:
         raise ValueError('unsupported features: ' + ', '.join(sorted(unknown)))
+    defaults = spec.get('default_features', [])
+    if len(defaults) != len(set(defaults)) or not set(defaults).issubset(spec['features']):
+        raise ValueError('invalid default features')
+    return [*defaults, *(feature for feature in features if feature not in defaults)]
+
+
+def profile_bytes(base, entry, features):
+    expected = transform(base, entry['edits'])
+    for feature in features:
+        expected = transform(expected, entry.get('optional', {}).get(feature, []))
+    return expected
+
+
+def prepare(source, version, features=()):
+    if version not in VERSIONS:
+        raise ValueError('unsupported version: ' + version)
+    spec = json.loads((ROOT / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
+    effective = selected_features(spec, features)
     pending, records = [], []
     for entry in spec['files']:
         path = source / entry['path']
@@ -43,10 +58,8 @@ def prepare(source, version, features=()):
         base = (ROOT / 'tests' / 'fixtures' / version / entry['path']).read_bytes()
         if digest(base) != entry['upstream_sha256']:
             raise ValueError('corrupt pinned source fixture: ' + entry['path'])
-        compatible = transform(base, entry['edits'])
-        expected = compatible
-        for feature in features:
-            expected = transform(expected, entry.get('optional', {}).get(feature, []))
+        compatible = profile_bytes(base, entry, spec.get('default_features', []))
+        expected = profile_bytes(base, entry, effective)
         actual = path.read_bytes()
         if actual == expected:
             status = 'already-applied' if expected != base else 'verified-unchanged'
@@ -86,7 +99,7 @@ def apply(source, version, report, features=(), dry_run=False):
             if temporary.exists():
                 temporary.unlink()
     result = {'schema': 1, 'version': version, 'profile': 'nianchu-compatible',
-              'features': list(features), 'dry_run': dry_run, 'files': records,
+              'features': selected_features(spec, features), 'dry_run': dry_run, 'files': records,
               'java_bridge': spec['java_bridge'],
               'binary_rewriting': False, 'runtime_tested': False}
     report.parent.mkdir(parents=True, exist_ok=True)

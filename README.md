@@ -28,31 +28,29 @@ Android arm64 自有源码构建工程，面向自有或已明确授权的测试
 
 ## 当前修改范围
 
-默认 `nianchu-compatible` 已包含两版 server 临时目录、agent/helper 资源名、helper 与注入 fallback abstract socket 前缀、Gadget/JS 线程标签，以及 Gum 嵌入初始化中已有的 prgname 赋值。17 另同步 helper DEX 创建/启动/清理、Zymbiote host/payload socket 模板及 blob mapper 标签。原始 fixture 与 SHA 保留，不修改 FD、长度计算或连接协议。
+默认 recipe 按参考 patch 开启 `exit-monitor-off`、`signal-interposition-off`、`agent-entrypoint-rename` 和 `gadget-json-config`。server 默认资源目录与 agent 前缀使用 UUID；helper、socket、memfd 和初始化品牌使用 `nianchu`。RPC 标记通过双层 Base64 解码生成，线上协议值仍为 `frida:rpc`；Droidy/ADB 对参考 patch 指定的 OPEN/CLSE/WRTE 分支执行 break。Linux 临时目录返回值按参考改为 `/system/lib64`，其设备权限与运行影响尚待实机验证。系统 Python 和现有 frida.exe 保持原状。
 
-Gadget 文章新增点已纳入两版源码：监听标签 `nianchu-t<port>`／`nianchu-unix`；Fruity 同时识别新标签和官方旧标签；raw/modulated 名称、生成头及 C/Objective-C 消费者同步；ELF 最终输出为 `nianchu-gadget.so`，compat 查找同名文件，Meson 最终 target 键仍为 `frida-gadget`。Windows/Darwin 最终文件布局保留。Droidy 仅改共享 SO/config 暂存前缀，App 内路径和协议不变；portal 仅改错误文案。当前两版 guard 为 43／47 份，默认修改 16／18 份文件。以上是源码闭环，不是新 Android 编译/运行证明。监听标签的上游 `Environment.set_thread_name()` 仅 i/macOS 有实际实现，非 Darwin 为空；Android worker 的 `g_thread_new` 标签是另一既有路径，不混称 TCP/Unix 标签已在 Android 生效。
+两版 pinned guard 已扩展到 **50／55** 份文件，涵盖 agent ELF 最终输出与 compat 消费者、embed-agent/embed-helper 的 ELF 重写钩子，以及 Gadget 文章的构建名、生成头、监听标签、Droidy 暂存和 JSON 配置查找。新增代码尚未进行本轮 Android 构建；旧 run 41951726835 的成功记录只适用于该 run 的源码。
 
-默认保留 `frida_agent_main` 和官方 `re.frida`／`re/frida`／`frida:rpc`；不改用户系统 Python、frida.exe。入口联动使用独立可选项，不与 Zygisk 初始化入口混淆。
-
-| 可选 feature | 功能代价／状态 |
+| feature | 当前默认与作用 |
 |---|---|
-| `zygisk-loader` | 仅模块版启用；增加显式配置初始化入口，普通自动加载不适用 |
-| `exit-monitor-off` | 禁用退出准备 interception，可能影响有序退出；CI 默认不启用 |
-| `signal-interposition-off` | 禁用 signal/sigaction replace，保留异常 handler 安装/清理；可能影响异常处理，CI 默认不启用 |
-| `agent-entrypoint-rename` | 定义、JNI/glue、导出、注入调用和测试统一为 `nianchu_agent_main`；源码重放已测，CCode 编译及最终 agent 动态 lookup 未测，CI 默认不启用 |
-| `gadget-json-config` | 仅 Android Gadget 自身配置查找增加 `.json`：`.config` → `.json` → `.config.so`；不改脚本配置、schema、显式 config_data 优先或错误处理，CI 默认不启用 |
+| `zygisk-loader` | 仅模块版追加；Android 构造函数不启动 Gadget，由 wrapper 显式初始化 |
+| `exit-monitor-off` | 默认开启；移除退出准备 interception 的构造逻辑 |
+| `signal-interposition-off` | 默认开启；停用 POSIX exception backend attach/detach 及 signal/sigaction interposition |
+| `agent-entrypoint-rename` | 默认开启；源码定义、导出与注入消费者统一为 `nianchu_agent_main` |
+| `gadget-json-config` | 默认开启；Android Gadget 查找 `.config` → `.json` → `.config.so`，显式 config_data 优先 |
 
-入口实验版的收集文件和模块 zip 带 `-entry-renamed-`，不得当作默认兼容版；Gadget 本身不使用 agent 入口。JSON Gadget/zip 带 `-json-config-`，组合为 `-entry-renamed-json-config-`；server 不添加 JSON 变体名。collector 记录实际 `final_filename`，Gadget 的 `gadget_config_lookup` 记录 Android 候选顺序、显式配置优先及 `runtime_lookup=not-tested`，server 为 `not-applicable`。名称与源码/hash 报告不符时拒绝收集/打包。当前 workflow 仍只构建 compatible 与 zygisk-loader，旧 Actions 未替新增入口、Gadget 命名和 JSON 项建立编译证据。
+产物名称继续标记 `-entry-renamed-`／`-json-config-` 等有效 feature；server 不添加 JSON 配置变体名。普通 Gadget 与模块专用 Gadget 分别收集；ELF 改写若改变模块初始化符号，最终 wrapper 必须消费经校验报告中的 `initialization_symbol`。
 
 ```text
-python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录> --version 16.7.19 --feature gadget-json-config --report <树外报告>
+python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录> --version 16.7.19 --report <树外报告>
 ```
 
-17.25.2 使用对应 version；模块实验需同时加 `--feature zygisk-loader`。默认普通 Gadget 构造函数仍自动初始化；JSON 项不是模块显式入口的替代。
+17.25.2 使用对应 version；模块构建追加 `--feature zygisk-loader`。默认 feature 自动合并，不需要在命令中重复列出。
 
-16 bundled Java bridge 默认固定 6.3.9，默认构建未修改 ART/GC/JDWP/PrettyMethod 功能。另有独立源码实验 `direct-art-gc`，见下节；不能把实验源码准备成功称为 server/Gadget 已采用。17 的 Java bridge 由客户端/脚本外置提供，官方 7.0.13 的独立 ESM 源码适配已完成，尚未打包或进行 Frida/Android 运行验证。当前补丁不是全面检测面隐藏，也不承诺所有 App 免检测。
+16 bundled Java bridge 6.3.9 已增加编译前参考 patch hook，移除 PrettyMethod hook；17 外置 7.0.13 使用独立 patch/build 脚本生成 bundle。它们与下节 `direct-art-gc` 实验是两套不同 profile，测试和产物报告分别记录。
 
-`patches/rename.py` 已改为**只读 ELF 边界审计**，不做任何二进制替换。hash 与 marker 报告不等于动态 lookup／协议握手验证。旧 `patches/frida-core`／`patches/frida-gum` 文件仅为历史参考，CI 不应用它们。
+`patches/rename.py` 现实现参考 ELF 批量改写，固定 LIEF **0.17.6**：修改符号中的 `frida/FRIDA`、四类 rodata 标记，以及参考脚本列出的线程/路径/ART 字符串；作者固定 `libwzdnb-agent` 品牌改用 `libnianchu-agent`。字符串随机替换保持等长，ELF 构建器处理动态字符串长度变化，并独立检查 GNU/SysV hash 查找。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 时仍是只读审计。静态检查与改写报告不等于 Android 动态加载、协议或 Java 功能通过。
 
 ## Java bridge 源码实验
 

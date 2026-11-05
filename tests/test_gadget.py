@@ -22,9 +22,7 @@ def source(version, relative, features=()):
     recipe = json.loads((ROOT / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
     entry = next(item for item in recipe['files'] if item['path'] == CORE + relative)
     base = (ROOT / 'tests/fixtures' / version / entry['path']).read_bytes()
-    data = patches.transform(base, entry['edits'])
-    for feature in features:
-        data = patches.transform(data, entry['optional'].get(feature, []))
+    data = patches.profile_bytes(base, entry, patches.selected_features(recipe, features))
     return base.decode('utf-8'), data.decode('utf-8'), entry
 
 
@@ -87,14 +85,17 @@ class GadgetTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(base.encode()).hexdigest(), sha)
                 self.assertEqual(entry['upstream_sha256'], sha)
                 self.assertNotEqual(base, actual)
-            _, _, entry = source(version, 'lib/gadget/gadget.vala')
+            _, default, entry = source(version, 'lib/gadget/gadget.vala')
             self.assertEqual(set(entry['optional']), {'gadget-json-config'})
+            _, explicit, _ = source(version, 'lib/gadget/gadget.vala', ['gadget-json-config'])
+            self.assertEqual(default, explicit)
 
     def test_listener_labels_and_fruity_consumer_all_ports(self):
         for version in patches.VERSIONS:
-            base, actual, _ = source(version, 'lib/gadget/gadget.vala')
-            self.assertEqual(actual, base.replace('"frida-gadget-tcp-%u"', '"nianchu-t%u"')
-                             .replace('"frida-gadget-unix"', '"nianchu-unix"'))
+            base, actual, entry = source(version, 'lib/gadget/gadget.vala')
+            labels_only = base.replace('"frida-gadget-tcp-%u"', '"nianchu-t%u"').replace('"frida-gadget-unix"', '"nianchu-unix"')
+            json_edit = entry['optional']['gadget-json-config'][0]
+            self.assertEqual(actual, labels_only.replace(json_edit['old'], json_edit['new']))
             label = re.search(r'Environment.set_thread_name \("([^"]+)"\.printf \(listen_port\)\)', actual)[1]
             old, fruity, _ = source(version, 'src/fruity/injector.vala')
             pattern = re.search(r'if \(/(.+)/\.match \(name, 0, out info\)\)', fruity)[1]
@@ -133,35 +134,52 @@ class GadgetTests(unittest.TestCase):
                 expected = old.replace('#include "frida-gadget.h"', '#include "nianchu-gadget.h"')
                 if relative.endswith('gadget-glue.c'):
                     expected = expected.replace('g_thread_new ("frida-gadget",', 'g_thread_new ("nianchu-gadget",')
+                    expected = expected.replace('  gum_script_backend_get_type (); /* Warm up */',
+                                                '  g_set_prgname ("nianchu");\n\n  gum_script_backend_get_type (); /* Warm up */')
                 self.assertEqual(text, expected)
                 self.assertNotIn('#include "frida-gadget.h"', text)
                 if relative.endswith('gadget-glue.c'):
+                    environment = function(text, '\nfrida_gadget_environment_init (void)', '\nfrida_gadget_environment_deinit ')
+                    self.assertEqual(environment.count('g_set_prgname ("nianchu");'), 1)
+                    self.assertLess(environment.index('g_set_prgname ("nianchu");'),
+                                    environment.index('gum_script_backend_get_type ();'))
+                    self.assertIn('frida_on_load (void)\n{\n  frida_gadget_load (NULL, NULL, NULL);\n}', text)
+                    self.assertNotIn('nianchu_gadget_init (', text)
                     naming = function(text, 'frida_gadget_environment_set_thread_name (const gchar * name)', '\n}\n')
                     self.assertIn('only implemented on i/macOS', naming)
                     self.assertNotIn('pthread_setname', naming)
                     self.assertNotIn('prctl', naming)
                 else:
                     self.assertIn('pthread_setname_np (name);', text)
-            _, glue, _ = source(version, 'lib/gadget/gadget-glue.c', ['zygisk-loader', 'gadget-json-config'])
+            _, glue, _ = source(version, 'lib/gadget/gadget-glue.c', ['zygisk-loader'])
             self.assertIn('frida_gadget_load (NULL, config_data, result);', glue)
             self.assertIn('#ifndef HAVE_ANDROID', glue)
 
     def test_elf_output_and_compat_preserve_platform_layout(self):
         for version in patches.VERSIONS:
             base, top, _ = source(version, 'meson.build')
-            expression = "((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix"
-            self.assertEqual(top, base.replace("'frida-gadget' + shlib_suffix", expression))
-            match = re.search(r"gadget_name = \(\(host_os_family in (\[[^]]+\])\) \? '([^']+)' : '([^']+)'\) \+ shlib_suffix", top)
-            platforms = ast.literal_eval(match[1])
-            for family, suffix, expected in (('linux', '.so', 'nianchu-gadget.so'), ('qnx', '.so', 'nianchu-gadget.so'),
-                                             ('windows', '.dll', 'frida-gadget.dll'), ('darwin', '.dylib', 'frida-gadget.dylib')):
-                self.assertEqual((match[2] if family in platforms else match[3]) + suffix, expected)
+            expected = base
+            for target in ('gadget', 'agent'):
+                expression = "((host_os_family in ['windows', 'darwin']) ? 'frida-" + target + "' : 'nianchu-" + target + "') + shlib_suffix"
+                expected = expected.replace("'frida-" + target + "' + shlib_suffix", expression)
+                match = re.search(target + r"_name = \(\(host_os_family in (\[[^]]+\])\) \? '([^']+)' : '([^']+)'\) \+ shlib_suffix", top)
+                self.assertIsNotNone(match)
+                platforms = ast.literal_eval(match[1])
+                for family, suffix, prefix in (('linux', '.so', 'nianchu-'), ('qnx', '.so', 'nianchu-'),
+                                               ('windows', '.dll', 'frida-'), ('darwin', '.dylib', 'frida-')):
+                    self.assertEqual((match[2] if family in platforms else match[3]) + suffix, prefix + target + suffix)
+            self.assertEqual(top, expected)
             old, compat, _ = source(version, 'compat/build.py')
-            self.assertEqual(compat, old.replace('GADGET_FILE_ELF = Path("lib") / "gadget" / "frida-gadget.so"',
-                                                'GADGET_FILE_ELF = Path("lib") / "gadget" / "nianchu-gadget.so"'))
-            self.assertIn('GADGET_TARGET = "frida-gadget"', compat)
-            self.assertIn('GADGET_FILE_WINDOWS = Path("lib") / "gadget" / "frida-gadget.dll"', compat)
-            self.assertIn('GADGET_FILE_DARWIN = Path("lib") / "gadget" / "frida-gadget.dylib"', compat)
+            expected = old
+            for target in ('gadget', 'agent'):
+                name = target.upper()
+                old_path = name + '_FILE_ELF = Path("lib") / "' + target + '" / "frida-' + target + '.so"'
+                new_path = name + '_FILE_ELF = Path("lib") / "' + target + '" / "nianchu-' + target + '.so"'
+                expected = expected.replace(old_path, new_path)
+                self.assertIn(name + '_TARGET = "frida-' + target + '"', compat)
+                self.assertIn(name + '_FILE_WINDOWS = Path("lib") / "' + target + '" / "frida-' + target + '.dll"', compat)
+                self.assertIn(name + '_FILE_DARWIN = Path("lib") / "' + target + '" / "frida-' + target + '.dylib"', compat)
+            self.assertEqual(compat, expected)
             ast.parse(compat)
 
     def test_droidy_staging_and_portal_only_change_branding(self):
@@ -182,51 +200,52 @@ class GadgetTests(unittest.TestCase):
                                                 'Emulated realm is not supported by nianchu-gadget'))
             self.assertIn('throw new Error.NOT_SUPPORTED (', portal)
 
-    def test_json_feature_is_scoped_to_android_gadget_lookup(self):
+    def test_default_json_config_is_scoped_to_android_gadget_lookup(self):
         for version in patches.VERSIONS:
-            _, compatible, entry = source(version, 'lib/gadget/gadget.vala')
-            _, featured, _ = source(version, 'lib/gadget/gadget.vala', ['gadget-json-config'])
+            base, default, entry = source(version, 'lib/gadget/gadget.vala')
+            _, explicit, _ = source(version, 'lib/gadget/gadget.vala', ['gadget-json-config'])
             edits = entry['optional']['gadget-json-config']
             self.assertEqual(len(edits), 1)
-            self.assertEqual(android_block(compatible).strip(), edits[0]['old'].strip())
-            self.assertEqual(android_block(featured).strip(), edits[0]['new'].strip())
-            self.assertEqual(featured.replace(android_block(featured), android_block(compatible)), compatible)
-            self.assertIn('config = (config_data != null)\n\t\t\t\t? parse_config (config_data)\n\t\t\t\t: load_config (location);', featured)
-            self.assertIn('return Path.build_filename (dirname, stem + ".config");', featured)
-            self.assertIn('derive_config_path_from_file_path (script_path)', featured)
-            self.assertIn('config_path = Path.build_filename (resource_dir, "config.json");', featured)
-            self.assertIn('if (gadget_path == null)\n\t\t\treturn new Config ();', featured)
-            self.assertNotIn('FileUtils.set_', android_block(featured))
+            self.assertEqual(android_block(base).strip(), edits[0]['old'].strip())
+            self.assertEqual(android_block(default).strip(), edits[0]['new'].strip())
+            self.assertEqual(default, explicit)
+            labels_only = base.replace('"frida-gadget-tcp-%u"', '"nianchu-t%u"').replace('"frida-gadget-unix"', '"nianchu-unix"')
+            self.assertEqual(default.replace(android_block(default), android_block(base)), labels_only)
+            self.assertIn('config = (config_data != null)\n\t\t\t\t? parse_config (config_data)\n\t\t\t\t: load_config (location);', default)
+            self.assertIn('return Path.build_filename (dirname, stem + ".config");', default)
+            self.assertIn('derive_config_path_from_file_path (script_path)', default)
+            self.assertIn('config_path = Path.build_filename (resource_dir, "config.json");', default)
+            self.assertIn('if (gadget_path == null)\n\t\t\treturn new Config ();', default)
+            self.assertNotIn('FileUtils.set_', android_block(default))
 
     def test_android_fallback_source_model_priority_and_missing(self):
         for version in patches.VERSIONS:
-            _, default, _ = source(version, 'lib/gadget/gadget.vala')
-            _, featured, _ = source(version, 'lib/gadget/gadget.vala', ['gadget-json-config'])
-            choose_default, choose_json = lookup_model(default), lookup_model(featured)
+            upstream, default, _ = source(version, 'lib/gadget/gadget.vala')
+            choose_upstream, choose_default = lookup_model(upstream), lookup_model(default)
             for path in ('/tmp/libnianchu-gadget.so', '/tmp/gadget', '/tmp/gadget.debug.so', '/tmp/.gadget'):
                 filename = posixpath.basename(path)
                 stem = filename[:filename.rfind('.')] if '.' in filename else filename
                 prefix = posixpath.join(posixpath.dirname(path), stem)
                 config, json_path, fallback = prefix + '.config', prefix + '.json', prefix + '.config.so'
-                self.assertEqual(choose_json(config, {config, json_path, fallback}), config)
-                self.assertEqual(choose_json(config, {json_path, fallback}), json_path)
-                self.assertEqual(choose_json(config, {fallback}), fallback)
-                self.assertEqual(choose_json(config, set()), fallback)
-                self.assertEqual(choose_default(config, {json_path, fallback}), fallback)
                 self.assertEqual(choose_default(config, {config, json_path, fallback}), config)
-            self.assertEqual(choose_json('extensionless', {'extensionless.json'}), 'extensionless.json')
-            self.assertEqual(choose_json('extensionless', set()), 'extensionless.config.so')
+                self.assertEqual(choose_default(config, {json_path, fallback}), json_path)
+                self.assertEqual(choose_default(config, {fallback}), fallback)
+                self.assertEqual(choose_default(config, set()), fallback)
+                self.assertEqual(choose_upstream(config, {json_path, fallback}), fallback)
+                self.assertEqual(choose_upstream(config, {config, json_path, fallback}), config)
+            self.assertEqual(choose_default('extensionless', {'extensionless.json'}), 'extensionless.json')
             self.assertEqual(choose_default('extensionless', set()), 'extensionless.config.so')
+            self.assertEqual(choose_upstream('extensionless', set()), 'extensionless.config.so')
         print('PASS Gadget config source model: restricted fallback translation; no Vala/Android execution')
 
     def test_config_errors_and_inline_priority_source_model(self):
         for version in patches.VERSIONS:
-            _, featured, _ = source(version, 'lib/gadget/gadget.vala', ['gadget-json-config'])
-            load = function(featured, '\tprivate Config load_config (Location location)', '\tprivate Config parse_config ')
+            _, default, _ = source(version, 'lib/gadget/gadget.vala')
+            load = function(default, '\tprivate Config load_config (Location location)', '\tprivate Config parse_config ')
             self.assertIn('if (e is FileError.NOENT)\n\t\t\t\treturn new Config ();', load)
             self.assertIn('throw new Error.PERMISSION_DENIED ("%s", e.message);', load)
             self.assertIn('throw new Error.INVALID_ARGUMENT ("Invalid config: %s", e.message);', load)
-            choose = lookup_model(featured)
+            choose = lookup_model(default)
             reads = []
 
             def model(files, inline=None):
@@ -274,7 +293,7 @@ class GadgetTests(unittest.TestCase):
                                 path.write_bytes(original + b'\n// drift\n')
                             before = {p.relative_to(root): p.read_bytes() for p in root.rglob('*') if p.is_file()}
                             with self.assertRaises(ValueError):
-                                patches.apply(root, version, directory / 'failure.json', ['gadget-json-config'])
+                                patches.apply(root, version, directory / 'failure.json')
                             self.assertEqual(before, {p.relative_to(root): p.read_bytes() for p in root.rglob('*') if p.is_file()})
                             path.write_bytes(original)
 

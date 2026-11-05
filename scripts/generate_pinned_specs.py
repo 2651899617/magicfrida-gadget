@@ -54,6 +54,8 @@ def main():
         extras.update({'subprojects/frida-core/' + path: sha for path, sha in entrypoint_files.items()})
         gadget_files = json.loads((ROOT / 'patches/gadget-files.json').read_text(encoding='utf-8'))[version]
         extras.update({'subprojects/frida-core/' + path: sha for path, sha in gadget_files.items()})
+        fullpatch_files = json.loads((ROOT / 'patches/fullpatch-files.json').read_text(encoding='utf-8'))[version]
+        extras.update({'subprojects/frida-core/' + path: sha for path, sha in fullpatch_files.items()})
         for path, sha in extras.items():
             matches = [guard for guard in guards if guard['path'] == path]
             if matches:
@@ -69,11 +71,21 @@ def main():
             text = data.decode('utf-8')
             changes, optional = [], {}
             if relative.endswith('server/server.vala'):
-                changes = [edit('"re.frida.server"', '"nianchu.server"')]
+                changes = [edit('private const string DEFAULT_DIRECTORY = "re.frida.server";',
+                                'private static string DEFAULT_DIRECTORY;'),
+                           edit('\tprivate static int main (string[] args) {\n',
+                                '\tprivate static int main (string[] args) {\n\t\tDEFAULT_DIRECTORY = GLib.Uuid.string_random ();\n')]
             elif relative.endswith('linux-host-session.vala'):
-                changes = [edit('"frida-agent-<arch>.so"', '"nianchu-agent-<arch>.so"'),
-                           edit('"frida-agent-arm.so"', '"nianchu-agent-arm.so"', 2),
-                           edit('"frida-agent-arm64.so"', '"nianchu-agent-arm64.so"', 2)]
+                changes = [edit('private AgentDescriptor? agent;',
+                                'private AgentDescriptor? agent;\n\t\tprivate string agent_prefix;'),
+                           edit('agent = new AgentDescriptor (PathTemplate ("frida-agent-<arch>.so"),',
+                                'agent_prefix = GLib.Uuid.string_random ();\n\t\t\tagent = new AgentDescriptor (PathTemplate (agent_prefix + "-<arch>.so"),'),
+                           edit('new AgentResource ("frida-agent-arm.so",', 'new AgentResource (agent_prefix + "-arm.so",'),
+                           edit('new AgentResource ("frida-agent-arm64.so",', 'new AgentResource (agent_prefix + "-arm64.so",'),
+                           edit('unowned string name;\n\t\t\tswitch (cpu_type_from_pid (pid))',
+                                'string name;\n\t\t\tswitch (cpu_type_from_pid (pid))'),
+                           edit('name = "frida-agent-arm.so";', 'name = agent_prefix + "-arm.so";'),
+                           edit('name = "frida-agent-arm64.so";', 'name = agent_prefix + "-arm64.so";')]
                 if version.startswith('17.'):
                     changes.extend([
                         edit('"/data/local/tmp/frida-helper-"', '"/data/local/tmp/nianchu-helper-"'),
@@ -89,7 +101,9 @@ def main():
                 changes = [edit('Gum.Mapper.new_take_blob ("frida-agent.so",',
                                 'Gum.Mapper.new_take_blob ("nianchu-agent.so",')]
             elif relative.endswith('src/frida-glue.c'):
-                changes = [edit('g_thread_new ("frida-main-loop",', 'g_thread_new ("nianchu-main",')]
+                changes = [edit('g_thread_new ("frida-main-loop",', 'g_thread_new ("nianchu-main",'),
+                           edit('\n    if (runtime == FRIDA_RUNTIME_OTHER)\n',
+                                '\n    g_set_prgname ("nianchu");\n\n    if (runtime == FRIDA_RUNTIME_OTHER)\n')]
             elif relative.endswith('gum/gum.c'):
                 changes = [edit('g_set_prgname ("frida");', 'g_set_prgname ("nianchu");')]
             elif relative.endswith('frida-helper-process.vala'):
@@ -100,9 +114,55 @@ def main():
             elif relative.endswith('frida-helper-backend.vala'):
                 changes = [edit('return "/frida-" + Uuid.string_random ();',
                                 'return "/nianchu-" + Uuid.string_random ();')]
+                if version.startswith('16.'):
+                    changes.append(edit('return Linux.syscall (SysCall.memfd_create, name, flags);',
+                                        'return Linux.syscall (SysCall.memfd_create, "nianchu-cache", flags);'))
+            elif relative.endswith('lib/base/linux.vala'):
+                changes = [edit('return Linux.syscall (LinuxSyscall.MEMFD_CREATE, name, flags);',
+                                'return Linux.syscall (LinuxSyscall.MEMFD_CREATE, "nianchu-cache", flags);')]
+            elif relative.endswith('lib/base/rpc.vala'):
+                helper = '''\t\tprivate string get_rpc_marker (bool quoted = false) {
+\t\t\tstring marker = (string) GLib.Base64.decode ((string) GLib.Base64.decode ("Wm5KcFpHRTZjbkJq"));
+\t\t\treturn quoted ? "\\\"" + marker + "\\\"" : marker;
+\t\t}
+
+'''
+                changes = [edit('\t\tprivate Gee.HashMap<string, PendingResponse> pending_responses',
+                                helper + '\t\tprivate Gee.HashMap<string, PendingResponse> pending_responses'),
+                           edit('.add_string_value ("frida:rpc")', '.add_string_value (get_rpc_marker ())'),
+                           edit('json.index_of ("\\\"frida:rpc\\\"")', 'json.index_of (get_rpc_marker (true))'),
+                           edit('type != "frida:rpc"', 'type != get_rpc_marker ()')]
+            elif relative.endswith(('src/droidy/droidy-client.vala', 'src/adb.vala')):
+                changes = [edit('throw new Error.PROTOCOL ("Unexpected command");',
+                                'break; /* Ignore unsolicited OPEN/CLSE/WRTE as in the reference patch. */')]
+            elif relative.endswith('src/freebsd/binjector-glue.c'):
+                changes = [edit('g_strdup_printf ("%s/binjector-%u", self->temp_path, self->id)',
+                                'g_strdup_printf ("%s/%p%u", self->temp_path, self, self->id)')]
+            elif relative.endswith(('src/droidy/droidy-host-session.vala', 'src/android-helper/client.vala')):
+                if '"/data/local/tmp/frida-helper-"' in text:
+                    changes = [edit('"/data/local/tmp/frida-helper-"', '"/data/local/tmp/nianchu-helper-"')]
+            elif relative.endswith('src/linux/system-linux.c'):
+                changes = [edit('return g_strdup ("/data/local/tmp");', 'return g_strdup ("/system/lib64");')]
+            elif relative.endswith(('src/embed-agent.py', 'src/embed-helper.py')):
+                # Apply before resource compilation, including every nonempty compat ELF.
+                kind = 'agent' if relative.endswith('embed-agent.py') else 'helper'
+                insertion = '''    if host_os in {"linux", "android"}:
+        rewriter = __import__("os").environ["NIANCHU_ELF_REWRITER"]
+        for asset in embedded_assets:
+            if asset.stat().st_size == 0:
+                continue
+            subprocess.run([sys.executable, "-I", rewriter, str(asset),
+                            "--rewrite", "--kind", "''' + kind + '''",
+                            "--report", str(asset) + ".rewrite.json"], check=True)
+
+'''
+                changes = [edit('    subprocess.run([\n        resource_compiler,',
+                                insertion + '    subprocess.run([\n        resource_compiler,')]
             elif relative.endswith('gadget-glue.c'):
                 changes = [edit('g_thread_new ("frida-gadget",', 'g_thread_new ("nianchu-gadget",'),
-                           edit('#include "frida-gadget.h"', '#include "nianchu-gadget.h"')]
+                           edit('#include "frida-gadget.h"', '#include "nianchu-gadget.h"'),
+                           edit('  gum_script_backend_get_type (); /* Warm up */',
+                                '  g_set_prgname ("nianchu");\n\n  gum_script_backend_get_type (); /* Warm up */')]
                 old = '''__attribute__ ((constructor)) static void
 frida_on_load (void)
 {
@@ -166,10 +226,14 @@ frida_on_load (void)
                 changes = [edit('#include "frida-gadget.h"', '#include "nianchu-gadget.h"')]
             elif relative == 'subprojects/frida-core/meson.build':
                 changes = [edit("gadget_name = 'frida-gadget' + shlib_suffix",
-                                "gadget_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix")]
+                                "gadget_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix"),
+                           edit("agent_name = 'frida-agent' + shlib_suffix",
+                                "agent_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-agent' : 'nianchu-agent') + shlib_suffix")]
             elif relative.endswith('compat/build.py'):
                 changes = [edit('GADGET_FILE_ELF = Path("lib") / "gadget" / "frida-gadget.so"',
-                                'GADGET_FILE_ELF = Path("lib") / "gadget" / "nianchu-gadget.so"')]
+                                'GADGET_FILE_ELF = Path("lib") / "gadget" / "nianchu-gadget.so"'),
+                           edit('AGENT_FILE_ELF = Path("lib") / "agent" / "frida-agent.so"',
+                                'AGENT_FILE_ELF = Path("lib") / "agent" / "nianchu-agent.so"')]
             elif relative.endswith('src/droidy/injector.vala'):
                 changes = [edit('"/data/local/tmp/frida-gadget-"', '"/data/local/tmp/nianchu-gadget-"', 2)]
             elif relative.endswith('src/fruity/injector.vala'):
@@ -179,6 +243,14 @@ frida_on_load (void)
                                 '"Emulated realm is not supported by nianchu-gadget"')]
             elif relative.endswith('gumscriptscheduler.c'):
                 changes = [edit('g_thread_new ("gum-js-loop",', 'g_thread_new ("nianchu-js",')]
+            elif relative.endswith('bindings/gumjs/generate-runtime.py') and version.startswith('16.'):
+                changes = [edit('    runtime_reldir = Path("runtime")\n',
+                    '''    subprocess.run([sys.executable, "-I", os.environ["NIANCHU_BRIDGE_PATCHER"],
+                    "--source", str(priv_dir / "node_modules" / "frida-java-bridge"),
+                    "--version", "6.3.9", "--report", str(priv_dir / "nianchu-bridge-report.json")], check=True)
+
+    runtime_reldir = Path("runtime")
+''')]
             elif relative.endswith('frida-gadget.version'):
                 optional['zygisk-loader'] = [edit('  local:\n', '  global:\n    nianchu_gadget_init;\n  local:\n')]
             elif relative.endswith('exit-monitor.vala'):
@@ -189,6 +261,10 @@ frida_on_load (void)
                 suffix = 'self, NULL);' if version.startswith('16.') else 'NULL, &options);'
                 indent = '      ' if version.startswith('16.') else '        '
                 optional['signal-interposition-off'] = [
+                    edit('    gum_exceptor_backend_detach (self);',
+                         '    /* Reference profile: POSIX exception backend was not attached. */'),
+                    edit('  gum_exceptor_backend_attach (backend);',
+                         '  /* Reference profile: do not install POSIX exception/signal handlers. */'),
                     edit('gum_interceptor_replace (interceptor, gum_original_signal,\n' + indent +
                          'gum_exceptor_backend_replacement_signal, ' + suffix,
                          '/* Experimental: signal interposition disabled. */'),
@@ -218,8 +294,10 @@ frida_on_load (void)
             destination.write_bytes(data)
         recipe = {'version': version, 'source': info['submodules'],
                   'features': ['exit-monitor-off', 'signal-interposition-off', 'zygisk-loader', 'agent-entrypoint-rename', 'gadget-json-config'],
-                  'java_bridge': {'mode': info['java_bridge'], 'modified': False,
-                                  'reason': 'ART/GC/JDWP removal needs functional replacement and runtime tests'},
+                  'default_features': ['exit-monitor-off', 'signal-interposition-off', 'agent-entrypoint-rename', 'gadget-json-config'],
+                  'java_bridge': {'mode': info['java_bridge'], 'modified': version.startswith('16.'),
+                                  'profile': 'reference-prettymethod-off',
+                                  'reason': '16 bundles the reference bridge patch; 17 publishes a separate patched client bundle'},
                   'files': files}
         destination = args.output / 'patches' / version / 'spec.json'
         destination.parent.mkdir(parents=True, exist_ok=True)

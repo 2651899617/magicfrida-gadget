@@ -2,16 +2,20 @@
 
 记录日期：2026-11-05。此文件区分源码、编译、下载完整性、安装格式与运行证据；不把旧第三方成品当成本轮交付。
 
-**当前工作区已增加新的源码补丁，下面的 Actions run 41822602267 和产品 hash 仅对应旧提交 `99150590…`，不包含本次 helper/socket/DEX/Zymbiote/prgname/main-loop、可选 agent 入口、Gadget 构建/监听/JSON 配置、bridge/runtime 或 GLib/SDK-lock 实验。新增源码尚未提交、未触发新编译、未进行设备测试。**
+**当前未提交工作树正在实施参考 full patch，区别于下文已推送提交。** 两版 pinned guard 扩展为 50／55 份；默认启用退出监控停用、POSIX signal backend 停用、agent 入口改名及 Gadget JSON 配置，并补充 UUID 目录/agent、RPC 编码、memfd 标签、Droidy/ADB 分支、Java bridge PrettyMethod 补丁和嵌入前 ELF 改写钩子。collector 只改写发布副本，module builder 读取经校验报告中的初始化入口。当前完整离线回归 **183 项通过、2 项跳过**；跳过项是 Windows 无符号链接创建权限。另有 ELF 专项 7/7、artifact 30/30、workflow 8/8、补丁组合32/32、Gadget 9/9、Java bridge 13/13。四种两版 Gadget/zygisk ELF 均完成内存改写与报告验证；检查 GNU/SysV hash、初始化导出和嵌入 ELF 完整性。`git diff --check` 通过。尚无本工作树的 Android 编译、真实 npm bridge 构建或设备运行证据；旧 Actions 成功不代表此工作树已构建。
+
+以下表格及产物 hash 是已提交版本的历史验证记录；与上段有差异时按各自提交范围理解。
+
+**当前提交 `be895fa4f4e074c92c942c5e73df84129ffc7dc5` 已推送至 `fix/build-integrity`。Actions run [41951726835](https://github.com/2651899617/magicfrida-gadget/actions/runs/41951726835) 的 checks 和 16.7.19／17.25.2 两个完整构建任务均 success，覆盖本次 Gadget 源码的 compatible／Zygisk profile。两版产品 artifact 已独立下载，完整 zip SHA-256、CRC、路径及源码/补丁/ELF/module 内容核验均通过，详见下文本轮产物表和只读报告。设备和 App 运行仍未测试。run 41822602267 与下文标明的旧产品 hash 仅属于旧提交 `99150590…`，不包含本次 Gadget 修改。**
 
 | 层级 | 已取得证据 | 未取得证据 |
 |---|---|---|
 | 版本 | 官方 tags、固定 super/core/gum/releng SHA；16.7.19 / NDK r25c、17.25.2 / NDK r29 | 不自动跟随未来版本 |
-| 补丁 | 两版 43／47 份 core/gum pinned 文件 guard；默认 16／18 份命名修改；Gadget 构建/头文件/Fruity 消费者闭环与可选 JSON 配置；可选 agent 入口联动 24／26 份文件；独立 bridge、GLib 线程、SDK-lock 和16 runtime接入 recipe | 新源码的 CCode/Android 编译、最终 embedded agent lookup；真实 Gadget 配置/SONAME/加载、ART/GC/异常功能、GLib 静态 SDK 重编及最终链接消费 |
-| 本地回归 | 最新 116 项全部通过、零 skip；每版 32 种 feature 集及正反顺序零 fuzz/零 offset 重放；Gadget 源码专项 9 项、产物专项 29 项；两版 ART 源码模型各 39 检查、真实 C++ 配置/SHA-256 30 检查通过 | runtime/模块打包的编译器是测试替身，Gadget 文件查找为限制性源码模型，不是 Android runtime；当前工作区改动尚未提交 |
-| GitHub 编译 | run 41822602267 的 checks、16/17 两个完整构建任务均 success；两版 server、魔改 Gadget 自动初始化版、魔改 Gadget Zygisk 专用版、wrapper 与模块 zip 已生成并上传 | 编译成功不是官方客户端连接或 App 可用性证据 |
-| 来源复核 | 两版实际 CI source 与 post-build patch 报告通过本地完整性校验；完整 GitHub 构建日志已保存 | 来源 JSON 不是防恶意伪造签名 |
-| 本地产品核验 | 两版归档大小/SHA-256、CRC、路径、最终二进制及模块载荷/入口/依赖/默认配置/源码 hash/许可证复核全部通过；两版 server 在设备执行 --version 正确 | 完整性检查不代表注入运行成功 |
+| 补丁 | 两版 43／47 份 core/gum pinned 文件 guard；默认 16／18 份命名修改；Gadget 构建/头文件/Fruity 消费者闭环与可选 JSON 配置；可选 agent 入口联动 24／26 份文件；独立 bridge、GLib 线程、SDK-lock 和16 runtime接入 recipe | 可选 CCode/agent 最终 lookup；JSON sidecar 的 Android runtime lookup；ART/GC/异常功能、GLib 静态 SDK 重编及独立 SDK-lock profile 最终链接消费 |
+| 本地回归 | 最新 116 项全部通过、零 skip；每版 32 种 feature 集及正反顺序零 fuzz/零 offset 重放；Gadget 源码专项 9 项、产物专项 29 项；两版 ART 源码模型各 39 检查、真实 C++ 配置/SHA-256 30 检查通过 | runtime/模块打包的模型单测使用测试替身，Gadget 文件查找为限制性源码模型，不是 Android runtime；可选 feature 组合不等同于本次已编译组合 |
+| GitHub 编译 | run 41951726835／提交 `be895fa4…` 的 checks 与 16/17 构建均 success；本次 116 项 Linux CI 回归成功；两版 server、自动初始化 Gadget、Zygisk 专用 Gadget、wrapper 与模块 zip 已构建并上传 | 编译成功不是官方客户端连接或 App 可用性证据 |
+| 来源复核 | run 41951726835 两版实际 CI source 与 compatible/Zygisk post-build patch 报告均通过当前本地完整性校验；完整构建日志归档已下载并通过归档 hash/CRC/路径检查 | 来源 JSON 不是防恶意伪造签名 |
+| 本地产品核验 | run 41951726835 两版产品 zip 大小/SHA-256、CRC、路径、final target/filename/config contract、ELF hash/导出、模块 payload/wrapper 入口与依赖/源码 hash/许可证均通过只读 verifier | runtime 未测试；不由静态核验推出设备加载或 App 可用 |
 | server 实机运行 | 16.7.19 对 com.tq.my：首轮非默认参数/remote spawn 失败并出现 arm32 zygote SIGBUS、随后 framework 重启；默认 server/USB 重试 spawn→resume 成功，目标 PID 和系统 PID 持续 30 秒稳定 | 尚未完成目标 App 脚本/Java 功能验收；首轮根因未确定；17 仅验证 --version，未注入 |
 | Zygisk wrapper | 两版 CI 交叉编译通过；本地复核真实 exported entry 与 NEEDED，通过且无 libc++_shared；最终专用 Gadget 显式初始化入口存在 | 设备 Zygisk API、SELinux/namespace/FD 加载及宿主业务未验证 |
 | 安装格式 | Magisk v29.0 文档与 APatch tag 11282 默认安装源码均确认管理器安装不要求 META-INF；默认提取后 source customize.sh，SKIPUNZIP=0 符合该流程 | 本轮未实际安装；未覆盖 APatch 自定义 metamodule 安装器；当前包不提供 recovery 安装入口 |
@@ -27,7 +31,7 @@
 - 最新完整回归：**116 项全部通过，零 skip**，用时 **144.339 秒**；每版 **32 种 feature 集**的直接/增量/重复与正反顺序零 fuzz/零 offset 重放通过。两版 direct ART 源码模型各 **39 检查通过**，真实 C++ 策略/hash **30 检查通过**。日志：[regression-full-gadget-locked-20261105.log](E:/frida魔改/work/nianchu-source-migration-tools-20261104/regression-full-gadget-locked-20261105.log)。此前 103 项为 Gadget 新迁移前基线，旧日志保留。新 Gadget 源码专项 9 项、产物专项 29 项（含新增 4 项身份/打包模型）通过；首轮专项有 1 项误将 16 排序符号套到 17 的测试断言失败，改为分版本断言后重跑通过，补丁保留两版原有排序符号。首次全套 116 项通过后又补非 Darwin 空实现及最终文件链接/解析身份断言，中间运行主动停止，最终对固定代码重新全套通过；停止日志不作通过证据。
 - `fridagadget16.5.7魔改.md` 的有效正文 13–290 已逐点采用：两版监听标签、raw/modulated/生成头与 glue/Darwin 消费者、ELF 最终 `nianchu-gadget.so` 及 compat 路径、Droidy 共享暂存前缀和 portal 文案。完整归档扫描发现 Fruity 的 TCP 标签识别消费者，新增同时接受官方旧标签/nianchu 标签，保留端口解析和复用流程。每版新增 8 份固定源码，清单为 `patches/gadget-files.json`；两版完整 guard 43／47、默认修改 16／18。
 - 可选 `gadget-json-config` 仅改 Android Gadget 的文件查找顺序为 `.config` → `.json` → `.config.so`；默认/脚本配置、framework、显式 config_data 优先及错误语义保留。Gadget/zip 带 `-json-config-`，与入口实验组合为 `-entry-renamed-json-config-`；server 不添加 JSON 变体名。collector/builder 校验实际最终文件名及源码/hash 配置约定，标注 `runtime_lookup=not-tested`。模块仍直接传 JSON，不复制文章的 App 私有配置写入或脚本安装。
-- Gadget 配置测试为限制性源码翻译模型；两版监听 set_thread_name 的非 Darwin 实现为空，只有 i/macOS 实际设置监听线程名，Android worker 的 g_thread_new 标签为另一既有路径。模块 zip 模型的 compiler/readelf 为替身、synthetic ELF 仅在临时测试目录。没有真实生成头编译、SONAME/dynamic lookup、Android Gadget 或模块运行证据。`git diff --check` 通过，既有 Git 换行 warning 保留，未做全仓换行规范化。
+- Gadget 配置测试为限制性源码翻译模型；两版监听 set_thread_name 的非 Darwin 实现为空，只有 i/macOS 实际设置监听线程名，Android worker 的 g_thread_new 标签是另一既有路径。真实 CI 已编译两版 generated header、普通及 Zygisk Gadget、wrapper 与模块；本轮只读 verifier 检查实际 ELF hash、导出及 wrapper 依赖，但没有运行 Gadget、验证 Android sidecar 查找或设备模块加载。模块 zip 单元测试中的 compiler/readelf 替身和 synthetic ELF 仅描述模型测试，不是本轮 CI 产品。`git diff --check` 通过，既有 Git 换行 warning 保留，未做全仓换行规范化。
 - 官方 Java bridge 6.3.9／7.0.13 源码包已从 registry.npmjs.org 下载并核 SHA-512/SHA-1；原 6.3.9 android.js 缓存与完整包逐字相同。两版独立 `direct-art-gc` 源码 recipe 已完成，联动原方法替换、clone 非虚原调用、GC/GetOat 角色及失败/revert 清理；7.0.13 另适配 ESM 与 Nterp clone 同步。桥接专项 **13 项通过**，两版各 **39 个源码模型检查通过**，零 fuzz/零 offset 重放和语法检查通过。下载未执行包代码；未改变用户 registry 或客户端。默认构建仍未启用实验 bridge，16 QJS/V8 和17外置打包、Frida/Android runtime 均未验证。
 - 当前两文件联动的独立准备包：[6.3.9](E:/frida魔改/work/nianchu-bridge-direct-gc-639-current-20261105/package)、[7.0.13](E:/frida魔改/work/nianchu-bridge-direct-gc-7013-current-20261105/package)，各自有 bridge-report.json；这是源码包，不是编译产物。旧 `nianchu-bridge-direct-gc-20261105` 初稿不含后续 class-factory 联动，不作当前输入。
 - 两版完整 releng/deps.toml fixture 与 SDK/bootstrap/GLib pins 已登记至 `patches/dependencies.json`。新增 `verify_dependency_sources.py` 的输入门槛：完整固定 checkout、HEAD 与 blob 字节、递归子模块；拒绝忽略的旧构建文件和 `skip-worktree` 掩盖漂移。专项 9 项通过；尚未接入 CI，不接受导出归档，不认证修改后的 SDK 或最终链接消费。
@@ -35,10 +39,37 @@
 - 16 独立 `gum-runtime` 源码接入已完成：默认空值选项、19 个实验包文件依赖、编译前严格准备、`-direct-art-gc` 缓存隔离、QJS/V8 生成 hash 报告。7 项专项通过，编译器为模型替身；无真实 runtime bundle/最终二进制/运行证据。CI 与 collector 未接入此变体，默认 bridge 不变。
 - GLib 独立 `thread-labels` recipe 每版 7 份 guard，只改两处诊断线程标签为 `nianchu-worker/nianchu-dbus`，生命周期保留；日志域/GType 保留。releng 独立 `sdk-lock` 在启用后核 SDK 的 machine/prefix、版本、文件集/hash，失败不走目录删除或 SDK 下载兜底；仅单 SDK 字节锁，不证明构建来源或最终链接。两类 recipe 的 8 项专项通过，未真实重编 SDK。
 - `GLib-GIO/GDBusProxy` 的日志/类型兼容方案及 `FridaScriptEngine/GumScript` 注册类型仍未完成。`pool_spawner/pool_spoiler` 固定 core/gum 未命中；`frida-inject` 命中独立工具 target/说明，非当前运行线程。
-- 本机 PATH 未发现 valac、Meson、Ninja、Clang 或 Docker；`wsl --list --quiet` 返回 1，解码错误明确为“未安装适用于 Linux 的 Windows 子系统”。未安装工具链或修改系统环境；未执行本轮完整 Frida/SDK 编译，未产出包含新增 patch 的 Android 二进制。最终 agent 动态符号 lookup、官方客户端、JS/Java/GC/异常/业务均未经本轮验证。
-- 此次实施 **无手机/ADB/KPM、无系统 Python/frida.exe 修改、无 commit/push/dispatch**；以下实机证据属于此前已结束的窄授权测试，不自动恢复。
+- 本轮实际 `make` 的是 Android Frida server/Gadget builddir 与模块 wrapper；不是 GLib/releng SDK 独立重编或 SDK-lock 实验构建。最终 agent 动态符号 lookup、官方客户端连接、JS/Java/GC/异常/业务均未经本次验证。
+- 本次提交 `be895fa4f4e074c92c942c5e73df84129ffc7dc5` 已推送至 `fix/build-integrity`，Actions run 41951726835 通过 checks 并完成两版 Android 构建；两份产品归档已完成独立校验，产品 hash 和报告见“本轮构建产物”。实机证据属于此前已结束的窄授权测试，不自动恢复，本次编译未操作手机/ADB/KPM。
 
-## 已验证的旧基线构建
+## 本轮构建产物（run 41951726835）
+
+构建提交 `be895fa4f4e074c92c942c5e73df84129ffc7dc5`，分支 `fix/build-integrity`。GitHub Actions checks（116 项，零 skip）及 16/17 两个完整构建 job 均 success；两版 build logs artifact 与产品 artifact 均已下载。产品归档 SHA-256 与 GitHub artifact digest 一致，ZIP CRC、成员路径和独立只读 verifier 全部通过。
+
+| 版本 | Artifact ID | ZIP 字节数 | ZIP SHA-256 |
+|---|---:|---:|---|
+| 16.7.19 | [13381138493](https://github.com/2651899617/magicfrida-gadget/actions/runs/41951726835/artifacts/13381138493) | 79,945,817 | `5cf6f18ad11ab68e0ae66718038085b3872097096732c4a23a5bd6aba4316d4c` |
+| 17.25.2 | [13381975309](https://github.com/2651899617/magicfrida-gadget/actions/runs/41951726835/artifacts/13381975309) | 118,985,668 | `cdcc6b8c898fff52c90fb4251e4c549c7aac2bfe3de5802919360fbaa17a0918` |
+
+| 版本 | 产物 | 字节数 | SHA-256 |
+|---|---|---:|---|
+| 16.7.19 | [server](E:/frida魔改/work/nianchu-build-41951726835-16.7.19/files/out/compatible/nianchu-server-16.7.19-android-arm64) | 53,698,272 | `618d342a8d385bf17671a3072fcc094f2654a07e1162b739490072fd5283db24` |
+| 16.7.19 | [自动初始化 Gadget](E:/frida魔改/work/nianchu-build-41951726835-16.7.19/files/out/compatible/nianchu-gadget-16.7.19-android-arm64.so) | 25,818,472 | `ea91862b0716b42196b96a06427bfda2e99ce38ac532e0b34d6ad723f2b0e228` |
+| 16.7.19 | [Zygisk 专用 Gadget](E:/frida魔改/work/nianchu-build-41951726835-16.7.19/files/out/zygisk/nianchu-gadget-zygisk-16.7.19-android-arm64.so) | 25,818,472 | `0907a6555bb554f59f1ea73576c454896b3fa7a829537a8312288e255b4c6c91` |
+| 16.7.19 | [Zygisk 模块 zip](E:/frida魔改/work/nianchu-build-41951726835-16.7.19/files/out/module/nianchu-zygisk-16.7.19-android-arm64.zip) | 10,161,298 | `79442cded48e331acc0629507903f00382dd54f056da04416088b8803ec53af9` |
+| 17.25.2 | [server](E:/frida魔改/work/nianchu-build-41951726835-17.25.2/files/out/compatible/nianchu-server-17.25.2-android-arm64) | 84,852,608 | `87a6fe3ff1997d47129a4f3a4f043732a33d0c0ef6681c75c17a8c91fd9344e3` |
+| 17.25.2 | [自动初始化 Gadget](E:/frida魔改/work/nianchu-build-41951726835-17.25.2/files/out/compatible/nianchu-gadget-17.25.2-android-arm64.so) | 39,409,456 | `e00c1ae28c545fd1b070810bb9d61dcd668524718a3182c5a3e35031fa6d5d56` |
+| 17.25.2 | [Zygisk 专用 Gadget](E:/frida魔改/work/nianchu-build-41951726835-17.25.2/files/out/zygisk/nianchu-gadget-zygisk-17.25.2-android-arm64.so) | 39,409,456 | `6379c9d64f58b8f1870002fd533bfca605aa7200fa1976d58d6dd67ede0216e0` |
+| 17.25.2 | [Zygisk 模块 zip](E:/frida魔改/work/nianchu-build-41951726835-17.25.2/files/out/module/nianchu-zygisk-17.25.2-android-arm64.zip) | 14,738,657 | `55cabb96d08dc077d08235cd9b943cd22a2166eb30181817569e6b6116f98014` |
+
+共同核验结果：Meson 的最终 target 是 installed custom target `frida-gadget`，最终文件名 `nianchu-gadget.so`；普通与 Zygisk 专用 Gadget hash 不同，每版两 profile 的 server hash 相同。Zygisk Gadget 实际导出 `nianchu_gadget_init`，wrapper 实际导出 `zygisk_module_entry`；wrapper NEEDED 为 `liblog.so`、`libdl.so`、`libm.so`、`libc.so`，无 `libc++_shared`。模块 zip 各有 12 个预期文件，内载 Gadget hash 与专用最终产物一致，targets.conf 全部注释，源码清单和 NOTICE 与提交源码一致。
+
+本地验证报告：[16.7.19](E:/frida魔改/work/nianchu-download-tools-20261104/verification-16-41951726835.json)、[17.25.2](E:/frida魔改/work/nianchu-download-tools-20261104/verification-17-41951726835.json)。下载和日志保存在 `E:/frida魔改/work/nianchu-build-41951726835-{16.7.19,17.25.2}` 与对应 `nianchu-logs-41951726835-*` 目录。
+
+这些是编译、来源与静态 ELF/包结构证据；本轮没有手机部署、客户端握手、Gadget sidecar 实际查找、Zygisk/SELinux 加载或 App/ART 功能运行测试。可选 `agent-entrypoint-rename`、`gadget-json-config`、ART bridge、独立 GLib SDK 与 SDK-lock feature 未包含在本次两个 build profile。
+
+
+## 已验证的旧基线构建（run 41822602267）
 
 - 仓库分支：`fix/build-integrity`。`main` 未合并，未发布 Release。
 - 构建提交：`99150590d5eb22bb492b6b1c1b1571c1635e7a66`。
@@ -176,6 +207,6 @@ server16 --disable-preload --ignore-crashes --verbose --listen=127.0.0.1:31416 -
 - worker 的 wait 不承诺暂停整个 App 主线程。100ms 是可配置试验值，不能声称所有 App 正确时机。
 - 模块使用文本 `targets.conf`，无图形选 App APK；默认无目标。不包含开机 APK 安装、属性改写、全局信号过滤或 KPM 自动加载。
 - 16 bundled Java bridge 为固定 6.3.9；17 bridge 为客户端/脚本外置依赖，不能将 server/Gadget 编译通过当作 Java bridge 功能验证。
-- 旧 system_server 专项崩溃目标未自动恢复；本轮仅按用户的新授权测试 com.tq.my server spawn，17 和 Gadget/Zygisk 未注入。
+- 以上两项实机证据来自此前已结束的窄授权测试；本次 CI 构建未部署产物或操作设备。17 和 Gadget/Zygisk 未进行设备注入。
 - 已部署两版 server 到独立临时目录，并执行 16 的上述两次测试；未加载 KPM、主动重启、清数据/重装 App、修改 /data/system 或 /data/app，也未修改系统 Python/frida.exe。测试服务已停；进一步设备实验需要明确测试范围。
-- 当前全部源码/fixture/测试/文档改动尚未提交/推送，继承的 `tests/test_source.py` 与旧运行证据保留；未为文档或离线迁移自动触发两版完整编译。
+- 源码与本轮文档变更已包含在提交 `be895fa4f4e074c92c942c5e73df84129ffc7dc5` 并推送至 `fix/build-integrity`；Actions run 41951726835 已完成两版构建。旧运行证据继续保留，未借本次 CI 恢复任何设备操作授权。
