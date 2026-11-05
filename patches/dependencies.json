@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "versions": {
+    "16.7.19": {
+      "releng_commit": "ddd0f5875c08edc005e9f89f7fdb7b0928fac4dc",
+      "deps_sha256": "82e4a39a4d4630e0daf1196b987e0caf04c600045cb02d23cafd29f7e705c809",
+      "sdk_version": "20250512",
+      "bootstrap_version": "20250321",
+      "glib": {
+        "commit": "8f43c78bc4f6a510c610c7738fdf23ecf99c6be8",
+        "url": "https://github.com/frida/glib.git"
+      }
+    },
+    "17.25.2": {
+      "releng_commit": "564352a3eac2ca0f5db776b6929955dbb20cf731",
+      "deps_sha256": "f6a358b7aa23b38cea45dc4a2e78b4eadd1eeb79adbe463b1cfe911a2018bf7e",
+      "sdk_version": "20261030",
+      "bootstrap_version": "20250801",
+      "glib": {
+        "commit": "c366177b9292432a26f6903fa82a71d83e4927eb",
+        "url": "https://github.com/frida-forks/glib.git"
+      }
+    }
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "version": "6.3.9",
+  "profile": "direct-art-gc",
+  "source": {
+    "url": "https://registry.npmjs.org/frida-java-bridge/-/frida-java-bridge-6.3.9.tgz",
+    "integrity": "sha512-fExkTX26591TZQAPuKCcWZUkpxHeSEV/D+cCWyZl2CDRy0grgXGqdDrZePcx656a8w/w2UDheLCI3zDZERVAFg==",
+    "shasum": "0d17c2aeeba526cead21b6b3b0b7ea5f1660d490",
+    "sha256": "fc0a7ff83903f758a5b2f36094768f09fd3ad4ce4a455c49eb96495a594147c9",
+    "license": "LGPL-2.0 WITH WxWindows-exception-3.1"
+  },
+  "package_files": {
+    "README.md": "27d9fbd0bad43f9ec68bd6b1ba091ca54335fb28a775efef17a98fdbfcdca59b",
+    "index.js": "279a3511b951a6144151bd72f66cf8c7ab4b4f34fed983564366831fa104b6ee",
+    "lib/alloc.js": "b4e2a3ca843a47891bd1de0769bafad6ef747424783e35ada5efc6aed2b918df",
+    "lib/android.d.ts": "b9df496d65fbad4374780f94b1fa5e7aef15178736858e5dc68dc4e5a10a5c6f",
+    "lib/android.js": "5f3ca5406930383d0ef72756ee75e66f1095fe5153f0c6a3288637cdd5c8f615",
+    "lib/api.js": "adf7d91dc6df9237ee6d92bf259998209ad8998968f7d859824eab86dd6ccf73",
+    "lib/class-factory.js": "1912cfa6bc9d62aa0324e0abff9b3327bbc7a21d525fe8257f1297abd9b85b45",
+    "lib/class-model.js": "ec01641085d3730e3571def02aa86fee1e02d7b1f18ccc06dcfb0166354fcf51",
+    "lib/env.js": "1369c63bf661028c0a20bf2137a008107eeaf9ae7bc3abb39cceffa14a8dd13b",
+    "lib/jvm.js": "d735094a4eabe02ac71352c9fed1bcc99150ce30c0e503178a0f27dcb939999c",
+    "lib/jvmti.js": "93e250e8fdca77b39ec06df2c547eb5d221867cae2b09ef328703dae2338cdd6",
+    "lib/lru.js": "1779b8abffadae1753bdc2e475f015c993915b1ae0487079db1d518214ff656f",
+    "lib/machine-code.js": "3d4eb555146567bceec2b0ed2d1b0060adb452190df4d279b8b5f97de494ed7a",
+    "lib/memoize.js": "f70b0dd6a81a4eded6489bf469d56242b07b03cf98241f7ced7d82219d5582f1",
+    "lib/mkdex.js": "979e7b3e3c4923bbf5d3d0003c8ca2aeb06ef9126ce7f550ca4aab39719bcec1",
+    "lib/result.js": "9901decb772ccb712e422baaba130c5c59bbbc44c63bdbed0385417ebb596e40",
+    "lib/types.js": "8c5070248fd8e9f9b4c41387ca6b6b0f66498109836b1ed43d1e090f66bf99ef",
+    "lib/vm.js": "05f0c8aba43f24b5d77d2bad2a64f53713602665d759d2c500d000a7d539110a",
+    "package.json": "7ee766b7ed7d2eff7a8a660c6398a7a69fa50ee6fe99a15d6126cf2ae82ed3db"
+  },
+  "files": [
+    {
+      "path": "lib/android.js",
+      "upstream_sha256": "5f3ca5406930383d0ef72756ee75e66f1095fe5153f0c6a3288637cdd5c8f615",
+      "edits": [
+        {
+          "old": "class ArtMethodMangler {\n  constructor (opaqueMethodId) {\n    const methodId = unwrapMethodId(opaqueMethodId);\n\n    this.methodId = methodId;\n    this.originalMethod = null;\n    this.hookedMethodId = methodId;\n    this.replacementMethodId = null;\n\n    this.interceptor = null;\n  }\n\n  replace (impl, isInstanceMethod, argTypes, vm, api) {\n    const { kAccCompileDontBother, artNterpEntryPoint } = api;\n\n    this.originalMethod = fetchArtMethod(this.methodId, vm);\n\n    const originalFlags = this.originalMethod.accessFlags;\n\n    if ((originalFlags & kAccXposedHookedMethod) !== 0 && xposedIsSupported()) {\n      const hookInfo = this.originalMethod.jniCode;\n      this.hookedMethodId = hookInfo.add(2 * pointerSize).readPointer();\n      this.originalMethod = fetchArtMethod(this.hookedMethodId, vm);\n    }\n\n    const { hookedMethodId } = this;\n\n    const replacementMethodId = cloneArtMethod(hookedMethodId, vm);\n    this.replacementMethodId = replacementMethodId;\n\n    patchArtMethod(replacementMethodId, {\n      jniCode: impl,\n      accessFlags: ((originalFlags & ~(kAccCriticalNative | kAccFastNative | kAccNterpEntryPointFastPathFlag)) | kAccNative | kAccCompileDontBother) >>> 0,\n      quickCode: api.artClassLinker.quickGenericJniTrampoline,\n      interpreterCode: api.artInterpreterToCompiledCodeBridge\n    }, vm);\n\n    // Remove kAccFastInterpreterToInterpreterInvoke and kAccSkipAccessChecks to disable use_fast_path\n    // in interpreter_common.h\n    let hookedMethodRemovedFlags = kAccFastInterpreterToInterpreterInvoke | kAccSingleImplementation | kAccNterpEntryPointFastPathFlag;\n    if ((originalFlags & kAccNative) === 0) {\n      hookedMethodRemovedFlags |= kAccSkipAccessChecks;\n    }\n\n    patchArtMethod(hookedMethodId, {\n      accessFlags: ((originalFlags & ~(hookedMethodRemovedFlags)) | kAccCompileDontBother) >>> 0\n    }, vm);\n\n    const quickCode = this.originalMethod.quickCode;\n\n    // Replace Nterp quick entrypoints with art_quick_to_interpreter_bridge to force stepping out\n    // of ART's next-generation interpreter and use the quick stub instead.\n    if (artNterpEntryPoint !== null && quickCode.equals(artNterpEntryPoint)) {\n      patchArtMethod(hookedMethodId, {\n        quickCode: api.artQuickToInterpreterBridge\n      }, vm);\n    }\n\n    if (!isArtQuickEntrypoint(quickCode)) {\n      const interceptor = new ArtQuickCodeInterceptor(quickCode);\n      interceptor.activate(vm);\n\n      this.interceptor = interceptor;\n    }\n\n    artController.replacedMethods.set(hookedMethodId, replacementMethodId);\n\n    notifyArtMethodHooked(hookedMethodId, vm);\n  }\n\n  revert (vm) {\n    const { hookedMethodId, interceptor } = this;\n\n    patchArtMethod(hookedMethodId, this.originalMethod, vm);\n\n    artController.replacedMethods.delete(hookedMethodId);\n\n    if (interceptor !== null) {\n      interceptor.deactivate();\n\n      this.interceptor = null;\n    }\n  }\n\n  resolveTarget (wrapper, isInstanceMethod, env, api) {\n    return this.hookedMethodId;\n  }\n}\n",
+          "new": "class ArtMethodMangler {\n  constructor (opaqueMethodId) {\n    this.methodId = unwrapMethodId(opaqueMethodId);\n    this.requiresDirectCall = true;\n    this.hookedMethodId = this.methodId;\n    this.originalMethod = null;\n    this.replacementMethodId = null;\n  }\n\n  replace (impl, isInstanceMethod, argTypes, vm, api) {\n    if (this.originalMethod !== null) {\n      throw new Error('Direct ART method is already replaced');\n    }\n    if (!['arm', 'arm64'].includes(Process.arch) || getAndroidApiLevel() < 23) {\n      throw new Error('Direct ART experiment requires Android >= 6.0 on ARM');\n    }\n\n    const originalMethod = fetchArtMethod(this.hookedMethodId, vm);\n    const originalFlags = originalMethod.accessFlags;\n    if ((originalFlags & kAccXposedHookedMethod) !== 0 && xposedIsSupported()) {\n      throw new Error('Direct ART experiment does not support Xposed method wrappers');\n    }\n    const { kAccCompileDontBother, artNterpEntryPoint } = api;\n    const quickCode = originalMethod.quickCode;\n    const isNterp = artNterpEntryPoint !== null && quickCode.equals(artNterpEntryPoint);\n    if (!isNterp && !isArtQuickEntrypoint(quickCode)) {\n      throw new Error('Direct ART experiment requires a non-compiled method entrypoint');\n    }\n\n    const replacementMethodId = cloneArtMethod(this.hookedMethodId, vm);\n    let removedFlags = kAccFastInterpreterToInterpreterInvoke | kAccSingleImplementation | kAccNterpEntryPointFastPathFlag;\n    if ((originalFlags & kAccNative) === 0) {\n      removedFlags |= kAccSkipAccessChecks;\n    }\n    patchArtMethod(replacementMethodId, {\n      accessFlags: ((originalFlags & ~removedFlags) | kAccCompileDontBother) >>> 0,\n      quickCode: isNterp ? api.artQuickToInterpreterBridge : quickCode\n    }, vm);\n\n    // Keep clone class references synchronized by the existing GC hooks.\n    ensureArtKnowsHowToHandleReplacementMethods(vm);\n    artController.replacedMethods.set(this.hookedMethodId, replacementMethodId);\n    try {\n      patchArtMethod(this.hookedMethodId, {\n        jniCode: impl,\n        accessFlags: ((originalFlags & ~(kAccCriticalNative | kAccFastNative | kAccNterpEntryPointFastPathFlag)) |\n          kAccNative | kAccCompileDontBother) >>> 0,\n        quickCode: api.artClassLinker.quickGenericJniTrampoline,\n        interpreterCode: api.artInterpreterToCompiledCodeBridge\n      }, vm);\n    } catch (e) {\n      try {\n        patchArtMethod(this.hookedMethodId, originalMethod, vm);\n      } finally {\n        artController.replacedMethods.delete(this.hookedMethodId);\n      }\n      throw e;\n    }\n    this.originalMethod = originalMethod;\n    this.replacementMethodId = replacementMethodId;\n  }\n\n  revert (vm) {\n    if (this.originalMethod === null) {\n      return;\n    }\n    patchArtMethod(this.hookedMethodId, this.originalMethod, vm);\n    artController.replacedMethods.delete(this.hookedMethodId);\n    this.originalMethod = null;\n    this.replacementMethodId = null;\n  }\n\n  resolveTarget (wrapper, isInstanceMethod, env, api) {\n    if (this.replacementMethodId === null) {\n      throw new Error('Direct ART method has no original-call clone');\n    }\n    return this.replacementMethodId;\n  }\n}\n",
+          "count": 1
+        },
+        {
+          "old": "  is_replacement = g_hash_table_contains (replacements, method);",
+          "new": "  /* Direct profile: the redirected original, not its original-call clone, is native. */\n  is_replacement = g_hash_table_contains (methods, method);",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "lib/class-factory.js",
+      "upstream_sha256": "1912cfa6bc9d62aa0324e0abff9b3327bbc7a21d525fe8257f1297abd9b85b45",
+      "edits": [
+        {
+          "old": "          methodId = mangler.resolveTarget(receiver, isInstanceMethod, env, api);",
+          "new": "          methodId = mangler.resolveTarget(receiver, isInstanceMethod, env, api);\n          if (mangler.requiresDirectCall === true) {\n            strategy = STRATEGY_DIRECT;\n          }",
+          "count": 1
+        },
+        {
+          "old": "        mangler.replace(replacement, type === INSTANCE_METHOD, argTypes, vm, api);",
+          "new": "        try {\n          mangler.replace(replacement, type === INSTANCE_METHOD, argTypes, vm, api);\n        } catch (e) {\n          this._r = undefined;\n          throw e;\n        }",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "integration": "standalone-source-only",
+  "runtime_tested": false,
+  "retained": [
+    "GetOatQuickMethodHeader",
+    "GC-class-reference-sync",
+    "PrettyMethod",
+    "JDWP"
+  ],
+  "unsupported": [
+    "Android-before-23",
+    "non-ARM",
+    "compiled-method-entrypoints",
+    "Xposed-wrappers"
+  ]
+}

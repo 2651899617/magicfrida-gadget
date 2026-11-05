@@ -1,0 +1,237 @@
+--- a/subprojects/frida-core/src/linux/linux-host-session.vala
++++ b/subprojects/frida-core/src/linux/linux-host-session.vala
+@@ -360,7 +360,7 @@
+ 		protected override async Future<IOStream> perform_attach_to (uint pid, HashTable<string, Variant> options,
+ 				Cancellable? cancellable, out Object? transport) throws Error, IOError {
+ 			uint id;
+-			string entrypoint = "frida_agent_main";
++			string entrypoint = "nianchu_agent_main";
+ 			string parameters = make_agent_parameters (pid, "", options);
+ 			AgentFeatures features = CONTROL_CHANNEL;
+ 			var linjector = (Linjector) injector;
+--- a/subprojects/frida-core/lib/agent/agent-glue.c
++++ b/subprojects/frida-core/lib/agent/agent-glue.c
+@@ -72,7 +72,7 @@
+ {
+   FridaAgentBridgeState * state = reserved;
+ 
+-  frida_agent_main (state->agent_parameters, &state->unload_policy, state->injector_state);
++  nianchu_agent_main (state->agent_parameters, &state->unload_policy, state->injector_state);
+ 
+   return JNI_VERSION_1_6;
+ }
+--- a/subprojects/frida-core/lib/agent/agent.vala
++++ b/subprojects/frida-core/lib/agent/agent.vala
+@@ -1,4 +1,5 @@
+ namespace Frida.Agent {
++	[CCode (cname = "nianchu_agent_main")]
+ 	public void main (string agent_parameters, ref Frida.UnloadPolicy unload_policy, void * injector_state) {
+ 		if (Runner.shared_instance == null)
+ 			Runner.create_and_run (agent_parameters, ref unload_policy, injector_state);
+--- a/subprojects/frida-core/lib/agent/frida-agent-android.version
++++ b/subprojects/frida-core/lib/agent/frida-agent-android.version
+@@ -1,6 +1,6 @@
+ {
+   global:
+-    frida_agent_main;
++    nianchu_agent_main;
+     JNI_OnLoad;
+ 
+   local:
+--- a/subprojects/frida-core/lib/agent/frida-agent-x86.symbols
++++ b/subprojects/frida-core/lib/agent/frida-agent-x86.symbols
+@@ -1 +1 @@
+-_frida_agent_main
++_nianchu_agent_main
+--- a/subprojects/frida-core/lib/agent/frida-agent.def
++++ b/subprojects/frida-core/lib/agent/frida-agent.def
+@@ -1,2 +1,2 @@
+ EXPORTS
+-	frida_agent_main
++	nianchu_agent_main
+--- a/subprojects/frida-core/lib/agent/frida-agent.symbols
++++ b/subprojects/frida-core/lib/agent/frida-agent.symbols
+@@ -1 +1 @@
+-frida_agent_main
++nianchu_agent_main
+--- a/subprojects/frida-core/lib/agent/frida-agent.version
++++ b/subprojects/frida-core/lib/agent/frida-agent.version
+@@ -1,6 +1,6 @@
+ {
+   global:
+-    frida_agent_main;
++    nianchu_agent_main;
+ 
+   local:
+     *;
+--- a/subprojects/frida-core/lib/agent/meson.build
++++ b/subprojects/frida-core/lib/agent/meson.build
+@@ -26,7 +26,7 @@
+     extra_link_depends += symfile
+   endif
+ elif host_os_family == 'darwin'
+-  extra_link_args += '-Wl,-exported_symbol,_frida_agent_main'
++  extra_link_args += '-Wl,-exported_symbol,_nianchu_agent_main'
+ else
+   symscript = (host_os == 'android') ? 'frida-agent-android.version' : 'frida-agent.version'
+   extra_link_args += '-Wl,--version-script,' + meson.current_source_dir() / symscript
+--- a/subprojects/frida-core/src/agent-container.vala
++++ b/subprojects/frida-core/src/agent-container.vala
+@@ -28,7 +28,7 @@
+ 			}
+ 
+ 			void * main_func_symbol;
+-			var main_func_found = container.module.symbol ("frida_agent_main", out main_func_symbol);
++			var main_func_found = container.module.symbol ("nianchu_agent_main", out main_func_symbol);
+ 			assert (main_func_found);
+ 			container.main_impl = (AgentMainFunc) main_func_symbol;
+ 
+--- a/subprojects/frida-core/src/darwin/darwin-host-session.vala
++++ b/subprojects/frida-core/src/darwin/darwin-host-session.vala
+@@ -307,7 +307,7 @@
+ 		private async uint inject_agent (uint pid, string agent_parameters, Cancellable? cancellable) throws Error, IOError {
+ 			uint id;
+ 
+-			unowned string entrypoint = "frida_agent_main";
++			unowned string entrypoint = "nianchu_agent_main";
+ #if HAVE_EMBEDDED_ASSETS
+ 			id = yield fruitjector.inject_library_resource (pid, agent, entrypoint, agent_parameters, cancellable);
+ #else
+--- a/subprojects/frida-core/src/freebsd/freebsd-host-session.vala
++++ b/subprojects/frida-core/src/freebsd/freebsd-host-session.vala
+@@ -132,7 +132,7 @@
+ 
+ 			var stream_request = Pipe.open (t.local_address, cancellable);
+ 
+-			var id = yield binjector.inject_library_resource (pid, agent_desc, "frida_agent_main",
++			var id = yield binjector.inject_library_resource (pid, agent_desc, "nianchu_agent_main",
+ 				make_agent_parameters (pid, t.remote_address, options), cancellable);
+ 			injectee_by_pid[pid] = id;
+ 
+--- a/subprojects/frida-core/src/qnx/qnx-host-session.vala
++++ b/subprojects/frida-core/src/qnx/qnx-host-session.vala
+@@ -117,7 +117,7 @@
+ 
+ 			var stream_request = Pipe.open (t.local_address, cancellable);
+ 
+-			var id = yield qinjector.inject_library_resource (pid, agent_desc, "frida_agent_main",
++			var id = yield qinjector.inject_library_resource (pid, agent_desc, "nianchu_agent_main",
+ 				make_agent_parameters (pid, t.remote_address, options), cancellable);
+ 			injectee_by_pid[pid] = id;
+ 
+--- a/subprojects/frida-core/src/windows/windows-host-session.vala
++++ b/subprojects/frida-core/src/windows/windows-host-session.vala
+@@ -225,7 +225,7 @@
+ 			var stream_request = Pipe.open (t.local_address, cancellable);
+ 
+ 			var winjector = injector as Winjector;
+-			var id = yield winjector.inject_library_resource (pid, agent, "frida_agent_main",
++			var id = yield winjector.inject_library_resource (pid, agent, "nianchu_agent_main",
+ 				make_agent_parameters (pid, t.remote_address, options), cancellable);
+ 			injectee_by_pid[pid] = id;
+ 
+--- a/subprojects/frida-core/tests/labrats/Makefile.android-arm.mk
++++ b/subprojects/frida-core/tests/labrats/Makefile.android-arm.mk
+@@ -39,7 +39,7 @@
+ %-agent-android-arm.version:
+ 	echo "LABRAT_AGENT_ANDROID_ARM_1.0 {"  > $@.tmp
+ 	echo "  global:"                      >> $@.tmp
+-	echo "    frida_agent_main;"          >> $@.tmp
++	echo "    nianchu_agent_main;"          >> $@.tmp
+ 	echo ""                               >> $@.tmp
+ 	echo "  local:"                       >> $@.tmp
+ 	echo "    *;"                         >> $@.tmp
+--- a/subprojects/frida-core/tests/labrats/Makefile.android-arm64.mk
++++ b/subprojects/frida-core/tests/labrats/Makefile.android-arm64.mk
+@@ -39,7 +39,7 @@
+ %-agent-android-arm64.version:
+ 	echo "LABRAT_AGENT_ANDROID_ARM64_1.0 {" > $@.tmp
+ 	echo "  global:"             >> $@.tmp
+-	echo "    frida_agent_main;" >> $@.tmp
++	echo "    nianchu_agent_main;" >> $@.tmp
+ 	echo ""                      >> $@.tmp
+ 	echo "  local:"              >> $@.tmp
+ 	echo "    *;"                >> $@.tmp
+--- a/subprojects/frida-core/tests/labrats/Makefile.android-x86.mk
++++ b/subprojects/frida-core/tests/labrats/Makefile.android-x86.mk
+@@ -39,7 +39,7 @@
+ %-agent-android-x86.version:
+ 	echo "LABRAT_AGENT_ANDROID_X86_1.0 {"   > $@.tmp
+ 	echo "  global:"                       >> $@.tmp
+-	echo "    frida_agent_main;"           >> $@.tmp
++	echo "    nianchu_agent_main;"           >> $@.tmp
+ 	echo ""                                >> $@.tmp
+ 	echo "  local:"                        >> $@.tmp
+ 	echo "    *;"                          >> $@.tmp
+--- a/subprojects/frida-core/tests/labrats/Makefile.android-x86_64.mk
++++ b/subprojects/frida-core/tests/labrats/Makefile.android-x86_64.mk
+@@ -39,7 +39,7 @@
+ %-agent-android-x86_64.version:
+ 	echo "LABRAT_AGENT_ANDROID_X86_64_1.0 {" > $@.tmp
+ 	echo "  global:"             >> $@.tmp
+-	echo "    frida_agent_main;" >> $@.tmp
++	echo "    nianchu_agent_main;" >> $@.tmp
+ 	echo ""                      >> $@.tmp
+ 	echo "  local:"              >> $@.tmp
+ 	echo "    *;"                >> $@.tmp
+--- a/subprojects/frida-core/tests/labrats/Makefile.qnx.mk
++++ b/subprojects/frida-core/tests/labrats/Makefile.qnx.mk
+@@ -54,7 +54,7 @@
+ %-agent-qnx-arm.version:
+ 	echo "{"     > $@.tmp
+ 	echo "  global:"             >> $@.tmp
+-	echo "    frida_agent_main;" >> $@.tmp
++	echo "    nianchu_agent_main;" >> $@.tmp
+ 	echo ""                      >> $@.tmp
+ 	echo "  local:"              >> $@.tmp
+ 	echo "    *;"                >> $@.tmp
+--- a/subprojects/frida-core/tests/labrats/agent.def
++++ b/subprojects/frida-core/tests/labrats/agent.def
+@@ -1,2 +1,2 @@
+ EXPORTS
+-	frida_agent_main
++	nianchu_agent_main
+--- a/subprojects/frida-core/tests/labrats/resident-agent.c
++++ b/subprojects/frida-core/tests/labrats/resident-agent.c
+@@ -48,7 +48,7 @@
+ #endif
+ 
+ void
+-frida_agent_main (const char * data, bool * stay_resident)
++nianchu_agent_main (const char * data, bool * stay_resident)
+ {
+   (void) data;
+ 
+--- a/subprojects/frida-core/tests/labrats/simple-agent.c
++++ b/subprojects/frida-core/tests/labrats/simple-agent.c
+@@ -51,7 +51,7 @@
+ #endif
+ 
+ void
+-frida_agent_main (const char * data)
++nianchu_agent_main (const char * data)
+ {
+   append_to_log ('m');
+ 
+--- a/subprojects/frida-core/tests/test-agent.vala
++++ b/subprojects/frida-core/tests/test-agent.vala
+@@ -452,7 +452,7 @@
+ 			}
+ 
+ 			void * main_func_symbol;
+-			var main_func_found = module.symbol ("frida_agent_main", out main_func_symbol);
++			var main_func_found = module.symbol ("nianchu_agent_main", out main_func_symbol);
+ 			assert_true (main_func_found);
+ 			main_impl = (AgentMainFunc) main_func_symbol;
+ 
+--- a/subprojects/frida-core/tests/test-injector.vala
++++ b/subprojects/frida-core/tests/test-injector.vala
+@@ -258,7 +258,7 @@
+ 				var path = Frida.Test.Labrats.path_to_library (name, arch);
+ 				assert_true (FileUtils.test (path, FileTest.EXISTS));
+ 
+-				yield injector.inject_library_file (process.id, path, "frida_agent_main", data);
++				yield injector.inject_library_file (process.id, path, "nianchu_agent_main", data);
+ 			} catch (GLib.Error e) {
+ 				printerr ("\nFAIL: %s\n\n", e.message);
+ 				assert_not_reached ();

@@ -42,6 +42,12 @@
  					throw new Error.NOT_SUPPORTED ("Emulated realm is not supported on this architecture");
 --- a/subprojects/frida-core/lib/gadget/gadget-glue.c
 +++ b/subprojects/frida-core/lib/gadget/gadget-glue.c
+@@ -1,4 +1,4 @@
+-#include "frida-gadget.h"
++#include "nianchu-gadget.h"
+ 
+ #include "frida-base.h"
+ #include "frida-payload.h"
 @@ -106,7 +106,7 @@
  
    worker_context = g_main_context_ref (g_main_context_default ());
@@ -62,3 +68,174 @@
          (GThreadFunc) gum_script_scheduler_run_js_loop, self);
    }
  }
+--- a/subprojects/frida-core/src/linux/frida-helper-process.vala
++++ b/subprojects/frida-core/src/linux/frida-helper-process.vala
+@@ -321,7 +321,7 @@
+ 			TimeoutSource? timeout_source = null;
+ 
+ 			try {
+-				string socket_path = "/frida-" + Uuid.string_random ();
++				string socket_path = "/nianchu-" + Uuid.string_random ();
+ 				string socket_address = "unix:abstract=" + socket_path;
+ 
+ 				service = new SocketService ();
+@@ -628,11 +628,11 @@
+ #if HAVE_EMBEDDED_ASSETS
+ 			var blob32 = Frida.Data.Helper.get_frida_helper_32_blob ();
+ 			if (blob32.data.length > 0)
+-				helper32 = make_temporary_helper ("frida-helper-32", blob32.data);
++				helper32 = make_temporary_helper ("nianchu-helper-32", blob32.data);
+ 
+ 			var blob64 = Frida.Data.Helper.get_frida_helper_64_blob ();
+ 			if (blob64.data.length > 0)
+-				helper64 = make_temporary_helper ("frida-helper-64", blob64.data);
++				helper64 = make_temporary_helper ("nianchu-helper-64", blob64.data);
+ #else
+ 			var tpl = PathTemplate (Config.FRIDA_HELPER_PATH);
+ 			string path = tpl.expand ((sizeof (void *) == 8) ? "32" : "64");
+--- a/subprojects/frida-core/src/linux/frida-helper-backend.vala
++++ b/subprojects/frida-core/src/linux/frida-helper-backend.vala
+@@ -1252,7 +1252,7 @@
+ 		}
+ 
+ 		private static string make_fallback_address () {
+-			return "/frida-" + Uuid.string_random ();
++			return "/nianchu-" + Uuid.string_random ();
+ 		}
+ 
+ 		private Future<RemoteAgent> establish_connection (LoaderLaunch launch, InjectSpec spec, BootstrapResult bres,
+--- a/subprojects/frida-gum/gum/gum.c
++++ b/subprojects/frida-gum/gum/gum.c
+@@ -302,7 +302,7 @@
+   g_log_set_default_handler (gum_on_log_message, NULL);
+   gum_do_init ();
+ 
+-  g_set_prgname ("frida");
++  g_set_prgname ("nianchu");
+ 
+ #if defined (HAVE_LINUX) && defined (HAVE_GLIBC)
+   gum_libdl_prevent_unload ();
+--- a/subprojects/frida-core/src/frida-glue.c
++++ b/subprojects/frida-core/src/frida-glue.c
+@@ -44,7 +44,7 @@
+     {
+       main_context = g_main_context_ref (g_main_context_default ());
+       main_loop = g_main_loop_new (main_context, FALSE);
+-      main_thread = g_thread_new ("frida-main-loop", run_main_loop, NULL);
++      main_thread = g_thread_new ("nianchu-main", run_main_loop, NULL);
+     }
+ 
+     g_once_init_leave (&frida_initialized, TRUE);
+--- a/subprojects/frida-core/lib/gadget/gadget.vala
++++ b/subprojects/frida-core/lib/gadget/gadget.vala
+@@ -650,7 +650,7 @@
+ 				var inet_address = listen_address as InetSocketAddress;
+ 				if (inet_address != null) {
+ 					uint16 listen_port = inet_address.get_port ();
+-					Environment.set_thread_name ("frida-gadget-tcp-%u".printf (listen_port));
++					Environment.set_thread_name ("nianchu-t%u".printf (listen_port));
+ 					if (request != null) {
+ 						request.set_value (listen_port);
+ 					} else {
+@@ -661,7 +661,7 @@
+ 				} else {
+ #if !WINDOWS
+ 					var unix_address = (UnixSocketAddress) listen_address;
+-					Environment.set_thread_name ("frida-gadget-unix");
++					Environment.set_thread_name ("nianchu-unix");
+ 					if (request != null) {
+ 						request.set_value (0);
+ 					} else {
+--- a/subprojects/frida-core/lib/gadget/meson.build
++++ b/subprojects/frida-core/lib/gadget/meson.build
+@@ -55,10 +55,10 @@
+   extra_link_args += ['-Wl,-Bsymbolic']
+ endif
+ 
+-raw_gadget = shared_library('frida-gadget-raw', gadget_sources,
++raw_gadget = shared_library('nianchu-gadget-raw', gadget_sources,
+   name_prefix: 'lib',
+   vala_args: [base_vala_args, payload_vala_args, extra_vala_args],
+-  vala_header: 'frida-gadget.h',
++  vala_header: 'nianchu-gadget.h',
+   c_args: frida_component_cflags,
+   objc_args: extra_objc_args,
+   link_args: extra_link_args,
+@@ -78,9 +78,9 @@
+     '--move', 'destructor', 'frida_on_unload', 'last',
+   ]
+ endif
+-modulated_gadget = custom_target('frida-gadget-modulated',
++modulated_gadget = custom_target('nianchu-gadget-modulated',
+   input: raw_gadget,
+-  output: 'libfrida-gadget-modulated' + shlib_suffix,
++  output: 'libnianchu-gadget-modulated' + shlib_suffix,
+   command: modulate + operations,
+ )
+ 
+--- a/subprojects/frida-core/lib/gadget/gadget-darwin.m
++++ b/subprojects/frida-core/lib/gadget/gadget-darwin.m
+@@ -1,4 +1,4 @@
+-#include "frida-gadget.h"
++#include "nianchu-gadget.h"
+ 
+ #import <Foundation/Foundation.h>
+ #include <objc/runtime.h>
+--- a/subprojects/frida-core/meson.build
++++ b/subprojects/frida-core/meson.build
+@@ -201,7 +201,7 @@
+ 
+ helper_name = 'frida-helper' + exe_suffix
+ agent_name = 'frida-agent' + shlib_suffix
+-gadget_name = 'frida-gadget' + shlib_suffix
++gadget_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix
+ 
+ root_asset_dir = get_option('libdir') / 'frida'
+ if host_os_family == 'darwin'
+--- a/subprojects/frida-core/compat/build.py
++++ b/subprojects/frida-core/compat/build.py
+@@ -644,7 +644,7 @@
+ GADGET_TARGET = "frida-gadget"
+ GADGET_FILE_WINDOWS = Path("lib") / "gadget" / "frida-gadget.dll"
+ GADGET_FILE_DARWIN = Path("lib") / "gadget" / "frida-gadget.dylib"
+-GADGET_FILE_ELF = Path("lib") / "gadget" / "frida-gadget.so"
++GADGET_FILE_ELF = Path("lib") / "gadget" / "nianchu-gadget.so"
+ 
+ SERVER_TARGET = "frida-server"
+ SERVER_FILE_UNIX = Path("server") / "frida-server"
+--- a/subprojects/frida-core/lib/payload/portal-client.vala
++++ b/subprojects/frida-core/lib/payload/portal-client.vala
+@@ -275,7 +275,7 @@
+ 			var opts = SessionOptions._deserialize (options);
+ 
+ 			if (opts.realm == EMULATED)
+-				throw new Error.NOT_SUPPORTED ("Emulated realm is not supported by frida-gadget");
++				throw new Error.NOT_SUPPORTED ("Emulated realm is not supported by nianchu-gadget");
+ 
+ 			AgentMessageSink sink;
+ 			try {
+--- a/subprojects/frida-core/src/droidy/injector.vala
++++ b/subprojects/frida-core/src/droidy/injector.vala
+@@ -77,9 +77,9 @@
+ 
+ 		private async GadgetDetails inject_gadget (Cancellable? cancellable) throws Error, IOError {
+ 			string instance_id = Uuid.string_random ().replace ("-", "");
+-			string so_path_shared = "/data/local/tmp/frida-gadget-" + instance_id + ".so";
++			string so_path_shared = "/data/local/tmp/nianchu-gadget-" + instance_id + ".so";
+ 			string so_path_app = "/data/data/" + package + "/gadget.so";
+-			string config_path_shared = "/data/local/tmp/frida-gadget-" + instance_id + ".config";
++			string config_path_shared = "/data/local/tmp/nianchu-gadget-" + instance_id + ".config";
+ 			string config_path_app = "/data/data/" + package + "/gadget.config";
+ 			string unix_socket_path = "frida:" + package;
+ 
+--- a/subprojects/frida-core/src/fruity/injector.vala
++++ b/subprojects/frida-core/src/fruity/injector.vala
+@@ -121,7 +121,7 @@
+ 					return true;
+ 
+ 				MatchInfo info;
+-				if (/^frida-gadget-tcp-(\d+)$/.match (name, 0, out info)) {
++				if (/^(?:frida-gadget-tcp-|nianchu-t)(\d+)$/.match (name, 0, out info)) {
+ 					string raw_port = info.fetch (1);
+ 
+ 					try {

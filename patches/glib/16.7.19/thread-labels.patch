@@ -1,0 +1,22 @@
+--- a/glib/gmain.c
++++ b/glib/gmain.c
+@@ -6785,7 +6785,7 @@
+ 
+   glib_worker_running = TRUE;
+ 
+-  glib_worker_thread = g_thread_new ("gmain", glib_worker_main, NULL);
++  glib_worker_thread = g_thread_new ("nianchu-worker", glib_worker_main, NULL);
+ 
+ #ifdef G_OS_UNIX
+   pthread_sigmask (SIG_SETMASK, &prev_mask, NULL);
+--- a/gio/gdbusprivate.c
++++ b/gio/gdbusprivate.c
+@@ -308,7 +308,7 @@
+ {
+   g_assert (data->thread == NULL);
+ 
+-  data->thread = g_thread_new ("gdbus",
++  data->thread = g_thread_new ("nianchu-dbus",
+                                gdbus_shared_thread_func,
+                                data);
+ }

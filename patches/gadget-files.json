@@ -1,0 +1,22 @@
+{
+  "16.7.19": {
+    "lib/gadget/gadget.vala": "8fa9f99b54bf3b15d9c91a245983f798f2d781e29e0f8354eaa92411e87414ba",
+    "lib/gadget/meson.build": "1c1cbe232bd5eb383c5d1bfbcedfe19fd6a844786e35d519e1e5d840b608ae3b",
+    "lib/gadget/gadget-darwin.m": "ead038f412e34003df70fc9388f1b773955cdd51da98cfe1bb1e7606c77a0855",
+    "meson.build": "f4b3a2e60bc4f9ca3e82991fb1a769d23d8ed2f5554bfa8c1605bd8e79e6dace",
+    "compat/build.py": "6a35a0ba7f3b37de499475f88b34ae2d9997d2122b63cb779b6f54347b65616a",
+    "lib/payload/portal-client.vala": "bcd48bbd8e3d0c1c32e0e341b35dc76b4fc8f9a14f890cd6c948d04b20b8571a",
+    "src/droidy/injector.vala": "836b0a8d54af468a7692b941f20cf98133232d7086ffd79a479fc88090ca9bee",
+    "src/fruity/injector.vala": "805b6f1d3c258e7e03241324d7feb0daf0457b7942bc91cba5d7e491f4b0bf22"
+  },
+  "17.25.2": {
+    "lib/gadget/gadget.vala": "e266bf6831ee95aa0f6b03491f3d5b053dcfa4492ac982eb49497757a6780a5d",
+    "lib/gadget/meson.build": "e1b69e8b63c6a5b2e1d77b4a6a0079c8515f7e687f69a913b57fc4b0f522a1c3",
+    "lib/gadget/gadget-darwin.m": "33c02f598d1fc0c11effb479a564c88484d96b349ea7b27a2852296881e1040e",
+    "meson.build": "67aecabc0552766dd5300d3329a8ac20621f16fcfd419d5bd8cd34aa18542c29",
+    "compat/build.py": "5ecb1be20483c947611c9f97b3095ad3d589cbf5eabeb9498aa9662c0e8e5119",
+    "lib/payload/portal-client.vala": "2728871e848b90e3a9f7e59557c232ad94228975771556a219722fac94a5cb2b",
+    "src/droidy/injector.vala": "587cbeb51cc6957a3654f687fccb2aff9d07e4715288279cd56e7ee13b83fd8c",
+    "src/fruity/injector.vala": "7bbf75b609fcb77c6185611bb8822c9d8ee571df3ba7ab8f8801e755fce49aa2"
+  }
+}

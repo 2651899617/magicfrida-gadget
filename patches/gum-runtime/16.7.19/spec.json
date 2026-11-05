@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "version": "16.7.19",
+  "profile": "direct-art-runtime",
+  "scope": "opt-in-runtime-source-integration-not-binary-consumption",
+  "files": [
+    {
+      "path": "bindings/gumjs/generate-runtime.py",
+      "upstream_sha256": "76762b1008551f3123454908eb855bd613fbc72af7560932d83ef278c0b7fdaf",
+      "edits": [
+        {
+          "old": "def main(argv):",
+          "new": "NIANCHU_BRIDGE_BASE_HASHES = {'README.md': '27d9fbd0bad43f9ec68bd6b1ba091ca54335fb28a775efef17a98fdbfcdca59b', 'index.js': '279a3511b951a6144151bd72f66cf8c7ab4b4f34fed983564366831fa104b6ee', 'lib/alloc.js': 'b4e2a3ca843a47891bd1de0769bafad6ef747424783e35ada5efc6aed2b918df', 'lib/android.d.ts': 'b9df496d65fbad4374780f94b1fa5e7aef15178736858e5dc68dc4e5a10a5c6f', 'lib/android.js': '5f3ca5406930383d0ef72756ee75e66f1095fe5153f0c6a3288637cdd5c8f615', 'lib/api.js': 'adf7d91dc6df9237ee6d92bf259998209ad8998968f7d859824eab86dd6ccf73', 'lib/class-factory.js': '1912cfa6bc9d62aa0324e0abff9b3327bbc7a21d525fe8257f1297abd9b85b45', 'lib/class-model.js': 'ec01641085d3730e3571def02aa86fee1e02d7b1f18ccc06dcfb0166354fcf51', 'lib/env.js': '1369c63bf661028c0a20bf2137a008107eeaf9ae7bc3abb39cceffa14a8dd13b', 'lib/jvm.js': 'd735094a4eabe02ac71352c9fed1bcc99150ce30c0e503178a0f27dcb939999c', 'lib/jvmti.js': '93e250e8fdca77b39ec06df2c547eb5d221867cae2b09ef328703dae2338cdd6', 'lib/lru.js': '1779b8abffadae1753bdc2e475f015c993915b1ae0487079db1d518214ff656f', 'lib/machine-code.js': '3d4eb555146567bceec2b0ed2d1b0060adb452190df4d279b8b5f97de494ed7a', 'lib/memoize.js': 'f70b0dd6a81a4eded6489bf469d56242b07b03cf98241f7ced7d82219d5582f1', 'lib/mkdex.js': '979e7b3e3c4923bbf5d3d0003c8ca2aeb06ef9126ce7f550ca4aab39719bcec1', 'lib/result.js': '9901decb772ccb712e422baaba130c5c59bbbc44c63bdbed0385417ebb596e40', 'lib/types.js': '8c5070248fd8e9f9b4c41387ca6b6b0f66498109836b1ed43d1e090f66bf99ef', 'lib/vm.js': '05f0c8aba43f24b5d77d2bad2a64f53713602665d759d2c500d000a7d539110a', 'package.json': '7ee766b7ed7d2eff7a8a660c6398a7a69fa50ee6fe99a15d6126cf2ae82ed3db'}\n\nNIANCHU_BRIDGE_RESULT_HASHES = {'README.md': '27d9fbd0bad43f9ec68bd6b1ba091ca54335fb28a775efef17a98fdbfcdca59b', 'index.js': '279a3511b951a6144151bd72f66cf8c7ab4b4f34fed983564366831fa104b6ee', 'lib/alloc.js': 'b4e2a3ca843a47891bd1de0769bafad6ef747424783e35ada5efc6aed2b918df', 'lib/android.d.ts': 'b9df496d65fbad4374780f94b1fa5e7aef15178736858e5dc68dc4e5a10a5c6f', 'lib/android.js': '1c60367c3eb00a1db1a0f6105ecd851d24d3497fe4a438668f5d98465cd1af94', 'lib/api.js': 'adf7d91dc6df9237ee6d92bf259998209ad8998968f7d859824eab86dd6ccf73', 'lib/class-factory.js': '244597a72d4f5dc3073ccb41285989bbde223492e2318fd8ca273d04738f854d', 'lib/class-model.js': 'ec01641085d3730e3571def02aa86fee1e02d7b1f18ccc06dcfb0166354fcf51', 'lib/env.js': '1369c63bf661028c0a20bf2137a008107eeaf9ae7bc3abb39cceffa14a8dd13b', 'lib/jvm.js': 'd735094a4eabe02ac71352c9fed1bcc99150ce30c0e503178a0f27dcb939999c', 'lib/jvmti.js': '93e250e8fdca77b39ec06df2c547eb5d221867cae2b09ef328703dae2338cdd6', 'lib/lru.js': '1779b8abffadae1753bdc2e475f015c993915b1ae0487079db1d518214ff656f', 'lib/machine-code.js': '3d4eb555146567bceec2b0ed2d1b0060adb452190df4d279b8b5f97de494ed7a', 'lib/memoize.js': 'f70b0dd6a81a4eded6489bf469d56242b07b03cf98241f7ced7d82219d5582f1', 'lib/mkdex.js': '979e7b3e3c4923bbf5d3d0003c8ca2aeb06ef9126ce7f550ca4aab39719bcec1', 'lib/result.js': '9901decb772ccb712e422baaba130c5c59bbbc44c63bdbed0385417ebb596e40', 'lib/types.js': '8c5070248fd8e9f9b4c41387ca6b6b0f66498109836b1ed43d1e090f66bf99ef', 'lib/vm.js': '05f0c8aba43f24b5d77d2bad2a64f53713602665d759d2c500d000a7d539110a', 'package.json': '7ee766b7ed7d2eff7a8a660c6398a7a69fa50ee6fe99a15d6126cf2ae82ed3db'}\n\n\ndef _read_bridge_files(directory):\n    if not directory.is_absolute() or not directory.is_dir():\n        raise ValueError(\"Java bridge source must be an existing absolute package path\")\n    if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents):\n        raise ValueError(\"Java bridge path must not contain symlinks\")\n    files = {}\n    for path in directory.rglob(\"*\"):\n        if path.is_symlink():\n            raise ValueError(\"Java bridge package must not contain symlinks\")\n        if path.is_dir():\n            continue\n        if not path.is_file():\n            raise ValueError(\"Java bridge package must contain regular files\")\n        files[path.relative_to(directory).as_posix()] = path.read_bytes()\n    return files\n\n\ndef _bridge_hashes(files):\n    import hashlib\n    return {relative: hashlib.sha256(data).hexdigest() for relative, data in sorted(files.items())}\n\n\ndef _prepare_bridge_inputs(bridge_source, output_dir, priv_dir):\n    if not bridge_source.is_absolute():\n        raise ValueError(\"Java bridge source path must be absolute\")\n    for path in (output_dir, priv_dir):\n        if not path.is_absolute() or path.is_symlink() or any(parent.is_symlink() for parent in path.parents):\n            raise ValueError(\"Java runtime output/cache paths must be absolute and not symlinks\")\n    if any(bridge_source.resolve().is_relative_to(path.resolve())\n           or path.resolve().is_relative_to(bridge_source.resolve()) for path in (output_dir, priv_dir)):\n        raise ValueError(\"Java bridge source must be separate from runtime output and cache\")\n    contents = _read_bridge_files(bridge_source)\n    if _bridge_hashes(contents) != NIANCHU_BRIDGE_RESULT_HASHES:\n        raise ValueError(\"direct-art-gc bridge package identity mismatch\")\n    return contents\n\n\ndef _stage_bridge_inputs(contents, priv_dir):\n    destination = priv_dir / \"node_modules\" / \"frida-java-bridge\"\n    actual = _bridge_hashes(_read_bridge_files(destination))\n    if actual not in (NIANCHU_BRIDGE_BASE_HASHES, NIANCHU_BRIDGE_RESULT_HASHES):\n        raise ValueError(\"runtime Java bridge cache drift or partial profile\")\n    changed = [relative for relative in contents\n               if NIANCHU_BRIDGE_BASE_HASHES[relative] != NIANCHU_BRIDGE_RESULT_HASHES[relative]]\n    staged = []\n    try:\n        for relative in changed:\n            path = destination / relative\n            temporary = path.with_name(path.name + \".nianchu-tmp\")\n            with temporary.open(\"xb\") as output:\n                output.write(contents[relative])\n            temporary.chmod(path.stat().st_mode & 0o777)\n            staged.append((temporary, path))\n        for temporary, path in staged:\n            os.replace(temporary, path)\n    finally:\n        for temporary, _ in staged:\n            if temporary.exists():\n                temporary.unlink()\n    if _bridge_hashes(_read_bridge_files(destination)) != NIANCHU_BRIDGE_RESULT_HASHES:\n        raise ValueError(\"runtime Java bridge staging identity mismatch\")\n\n\ndef _write_bridge_generation_report(output_dir, priv_dir, backends):\n    outputs = []\n    if \"qjs\" in backends:\n        outputs += [output_dir / \"gumquickscript-java.h\", priv_dir / \"out-qjs/java.js\",\n                    priv_dir / \"out-qjs/java.qjs\"]\n    if \"v8\" in backends:\n        outputs += [output_dir / \"gumv8script-java.h\", priv_dir / \"out-v8/java.js\"]\n    if not outputs:\n        raise ValueError(\"Java bridge experiment requires a JavaScript backend\")\n    import hashlib\n    report = {\"schema\": 1, \"profile\": \"direct-art-gc\", \"bridge_version\": \"6.3.9\",\n              \"bridge_files\": NIANCHU_BRIDGE_RESULT_HASHES,\n              \"generated_files\": {path.relative_to(output_dir).as_posix()\n                                  if path.is_relative_to(output_dir) else path.relative_to(priv_dir).as_posix():\n                                  hashlib.sha256(path.read_bytes()).hexdigest() for path in outputs},\n              \"runtime_generated\": True, \"frida_binary_built\": False,\n              \"final_binary_consumption_verified\": False, \"runtime_tested\": False}\n    (output_dir / \"nianchu-java-bridge-report.json\").write_text(json.dumps(report, indent=2) + \"\\n\",\n                                                              encoding=\"utf-8\")\n\n\ndef main(argv):",
+          "count": 1
+        },
+        {
+          "old": "    arch, endian = argv[10:]",
+          "new": "    arch, endian = argv[10:12]\n    bridge_source = Path(argv[12]) if len(argv) > 12 and argv[12] else None",
+          "count": 1
+        },
+        {
+          "old": "                         backends, arch, endian)",
+          "new": "                         backends, arch, endian, bridge_source)",
+          "count": 1
+        },
+        {
+          "old": "def generate_runtime(output_dir, priv_dir, input_dir, gum_dir, capstone_incdir, libtcc_incdir, npm, quickcompile, backends, arch, endian):",
+          "new": "def generate_runtime(output_dir, priv_dir, input_dir, gum_dir, capstone_incdir, libtcc_incdir, npm, quickcompile, backends, arch, endian, bridge_source=None):\n    bridge_contents = None\n    if bridge_source is not None:\n        if not backends:\n            raise ValueError(\"Java bridge experiment requires a JavaScript backend\")\n        priv_dir = priv_dir.with_name(priv_dir.name + \"-direct-art-gc\")\n        bridge_contents = _prepare_bridge_inputs(bridge_source, output_dir, priv_dir)\n",
+          "count": 1
+        },
+        {
+          "old": "    runtime_reldir = Path(\"runtime\")",
+          "new": "    if bridge_contents is not None:\n        _stage_bridge_inputs(bridge_contents, priv_dir)\n\n    runtime_reldir = Path(\"runtime\")",
+          "count": 1
+        },
+        {
+          "old": "    (output_dir / \"runtime.bundle\").write_bytes(b\"\")",
+          "new": "    if bridge_contents is not None:\n        _write_bridge_generation_report(output_dir, priv_dir, backends)\n\n    (output_dir / \"runtime.bundle\").write_bytes(b\"\")",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "bindings/gumjs/meson.build",
+      "upstream_sha256": "1605efc5246092fdc6120a4dec2d4ec45d039fc272b2d9da2eb96d3c415f99a1",
+      "edits": [
+        {
+          "old": "gumjs_runtime_outputs = [",
+          "new": "nianchu_bridge_source = get_option('nianchu_java_bridge_source')\nif nianchu_bridge_source != ''\n  gumjs_runtime_sources += files(\n    nianchu_bridge_source / 'README.md',\n    nianchu_bridge_source / 'index.js',\n    nianchu_bridge_source / 'lib/alloc.js',\n    nianchu_bridge_source / 'lib/android.d.ts',\n    nianchu_bridge_source / 'lib/android.js',\n    nianchu_bridge_source / 'lib/api.js',\n    nianchu_bridge_source / 'lib/class-factory.js',\n    nianchu_bridge_source / 'lib/class-model.js',\n    nianchu_bridge_source / 'lib/env.js',\n    nianchu_bridge_source / 'lib/jvm.js',\n    nianchu_bridge_source / 'lib/jvmti.js',\n    nianchu_bridge_source / 'lib/lru.js',\n    nianchu_bridge_source / 'lib/machine-code.js',\n    nianchu_bridge_source / 'lib/memoize.js',\n    nianchu_bridge_source / 'lib/mkdex.js',\n    nianchu_bridge_source / 'lib/result.js',\n    nianchu_bridge_source / 'lib/types.js',\n    nianchu_bridge_source / 'lib/vm.js',\n    nianchu_bridge_source / 'package.json',\n  )\nendif\n\ngumjs_runtime_outputs = [",
+          "count": 1
+        },
+        {
+          "old": "install_headers(gumjs_headers, subdir: install_header_basedir / 'gumjs')",
+          "new": "if nianchu_bridge_source != ''\n  gumjs_runtime_outputs += 'nianchu-java-bridge-report.json'\nendif\n\ninstall_headers(gumjs_headers, subdir: install_header_basedir / 'gumjs')",
+          "count": 1
+        },
+        {
+          "old": "    host_machine.endian(),\n  ],",
+          "new": "    host_machine.endian(),\n    nianchu_bridge_source,\n  ],",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "meson.options",
+      "upstream_sha256": "5268cb02ba61e198af553754699e5fc990a7504a7ee36b751257d6289c32a212",
+      "edits": [
+        {
+          "old": "option('frida_java_bridge',",
+          "new": "option('nianchu_java_bridge_source',\n  type: 'string',\n  value: '',\n  description: 'Experimental pinned direct-art-gc package path; empty keeps upstream bridge'\n)\n\noption('frida_java_bridge',",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "bridge_version": "6.3.9",
+  "bridge_result_hashes": {
+    "README.md": "27d9fbd0bad43f9ec68bd6b1ba091ca54335fb28a775efef17a98fdbfcdca59b",
+    "index.js": "279a3511b951a6144151bd72f66cf8c7ab4b4f34fed983564366831fa104b6ee",
+    "lib/alloc.js": "b4e2a3ca843a47891bd1de0769bafad6ef747424783e35ada5efc6aed2b918df",
+    "lib/android.d.ts": "b9df496d65fbad4374780f94b1fa5e7aef15178736858e5dc68dc4e5a10a5c6f",
+    "lib/android.js": "1c60367c3eb00a1db1a0f6105ecd851d24d3497fe4a438668f5d98465cd1af94",
+    "lib/api.js": "adf7d91dc6df9237ee6d92bf259998209ad8998968f7d859824eab86dd6ccf73",
+    "lib/class-factory.js": "244597a72d4f5dc3073ccb41285989bbde223492e2318fd8ca273d04738f854d",
+    "lib/class-model.js": "ec01641085d3730e3571def02aa86fee1e02d7b1f18ccc06dcfb0166354fcf51",
+    "lib/env.js": "1369c63bf661028c0a20bf2137a008107eeaf9ae7bc3abb39cceffa14a8dd13b",
+    "lib/jvm.js": "d735094a4eabe02ac71352c9fed1bcc99150ce30c0e503178a0f27dcb939999c",
+    "lib/jvmti.js": "93e250e8fdca77b39ec06df2c547eb5d221867cae2b09ef328703dae2338cdd6",
+    "lib/lru.js": "1779b8abffadae1753bdc2e475f015c993915b1ae0487079db1d518214ff656f",
+    "lib/machine-code.js": "3d4eb555146567bceec2b0ed2d1b0060adb452190df4d279b8b5f97de494ed7a",
+    "lib/memoize.js": "f70b0dd6a81a4eded6489bf469d56242b07b03cf98241f7ced7d82219d5582f1",
+    "lib/mkdex.js": "979e7b3e3c4923bbf5d3d0003c8ca2aeb06ef9126ce7f550ca4aab39719bcec1",
+    "lib/result.js": "9901decb772ccb712e422baaba130c5c59bbbc44c63bdbed0385417ebb596e40",
+    "lib/types.js": "8c5070248fd8e9f9b4c41387ca6b6b0f66498109836b1ed43d1e090f66bf99ef",
+    "lib/vm.js": "05f0c8aba43f24b5d77d2bad2a64f53713602665d759d2c500d000a7d539110a",
+    "package.json": "7ee766b7ed7d2eff7a8a660c6398a7a69fa50ee6fe99a15d6126cf2ae82ed3db"
+  },
+  "runtime_generated": false,
+  "sdk_built": false,
+  "sdk_consumption_verified": false,
+  "runtime_tested": false
+}

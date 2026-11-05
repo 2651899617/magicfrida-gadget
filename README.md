@@ -28,17 +28,69 @@ Android arm64 自有源码构建工程，面向自有或已明确授权的测试
 
 ## 当前修改范围
 
-默认 `nianchu-compatible` 仅包括经过固定源码联动检查的四类命名修改：server 临时目录、自有 agent 临时资源名、Gadget 线程标签、JS scheduler 线程标签。保留 `frida_agent_main` 和官方 `re.frida`／`re/frida`／`frida:rpc`；不改用户系统 Python、frida.exe。
+默认 `nianchu-compatible` 已包含两版 server 临时目录、agent/helper 资源名、helper 与注入 fallback abstract socket 前缀、Gadget/JS 线程标签，以及 Gum 嵌入初始化中已有的 prgname 赋值。17 另同步 helper DEX 创建/启动/清理、Zymbiote host/payload socket 模板及 blob mapper 标签。原始 fixture 与 SHA 保留，不修改 FD、长度计算或连接协议。
+
+Gadget 文章新增点已纳入两版源码：监听标签 `nianchu-t<port>`／`nianchu-unix`；Fruity 同时识别新标签和官方旧标签；raw/modulated 名称、生成头及 C/Objective-C 消费者同步；ELF 最终输出为 `nianchu-gadget.so`，compat 查找同名文件，Meson 最终 target 键仍为 `frida-gadget`。Windows/Darwin 最终文件布局保留。Droidy 仅改共享 SO/config 暂存前缀，App 内路径和协议不变；portal 仅改错误文案。当前两版 guard 为 43／47 份，默认修改 16／18 份文件。以上是源码闭环，不是新 Android 编译/运行证明。监听标签的上游 `Environment.set_thread_name()` 仅 i/macOS 有实际实现，非 Darwin 为空；Android worker 的 `g_thread_new` 标签是另一既有路径，不混称 TCP/Unix 标签已在 Android 生效。
+
+默认保留 `frida_agent_main` 和官方 `re.frida`／`re/frida`／`frida:rpc`；不改用户系统 Python、frida.exe。入口联动使用独立可选项，不与 Zygisk 初始化入口混淆。
 
 | 可选 feature | 功能代价／状态 |
 |---|---|
 | `zygisk-loader` | 仅模块版启用；增加显式配置初始化入口，普通自动加载不适用 |
 | `exit-monitor-off` | 禁用退出准备 interception，可能影响有序退出；CI 默认不启用 |
 | `signal-interposition-off` | 禁用 signal/sigaction replace，保留异常 handler 安装/清理；可能影响异常处理，CI 默认不启用 |
+| `agent-entrypoint-rename` | 定义、JNI/glue、导出、注入调用和测试统一为 `nianchu_agent_main`；源码重放已测，CCode 编译及最终 agent 动态 lookup 未测，CI 默认不启用 |
+| `gadget-json-config` | 仅 Android Gadget 自身配置查找增加 `.json`：`.config` → `.json` → `.config.so`；不改脚本配置、schema、显式 config_data 优先或错误处理，CI 默认不启用 |
 
-16 bundled Java bridge 固定 6.3.9，当前未修改 ART/GC/JDWP/PrettyMethod 功能。17 的 Java bridge 由客户端/脚本外置提供，不能声称 server/Gadget 补丁会修改它。当前补丁不是全面检测面隐藏，也不承诺所有 App 免检测。
+入口实验版的收集文件和模块 zip 带 `-entry-renamed-`，不得当作默认兼容版；Gadget 本身不使用 agent 入口。JSON Gadget/zip 带 `-json-config-`，组合为 `-entry-renamed-json-config-`；server 不添加 JSON 变体名。collector 记录实际 `final_filename`，Gadget 的 `gadget_config_lookup` 记录 Android 候选顺序、显式配置优先及 `runtime_lookup=not-tested`，server 为 `not-applicable`。名称与源码/hash 报告不符时拒绝收集/打包。当前 workflow 仍只构建 compatible 与 zygisk-loader，旧 Actions 未替新增入口、Gadget 命名和 JSON 项建立编译证据。
+
+```text
+python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录> --version 16.7.19 --feature gadget-json-config --report <树外报告>
+```
+
+17.25.2 使用对应 version；模块实验需同时加 `--feature zygisk-loader`。默认普通 Gadget 构造函数仍自动初始化；JSON 项不是模块显式入口的替代。
+
+16 bundled Java bridge 默认固定 6.3.9，默认构建未修改 ART/GC/JDWP/PrettyMethod 功能。另有独立源码实验 `direct-art-gc`，见下节；不能把实验源码准备成功称为 server/Gadget 已采用。17 的 Java bridge 由客户端/脚本外置提供，官方 7.0.13 的独立 ESM 源码适配已完成，尚未打包或进行 Frida/Android 运行验证。当前补丁不是全面检测面隐藏，也不承诺所有 App 免检测。
 
 `patches/rename.py` 已改为**只读 ELF 边界审计**，不做任何二进制替换。hash 与 marker 报告不等于动态 lookup／协议握手验证。旧 `patches/frida-core`／`patches/frida-gum` 文件仅为历史参考，CI 不应用它们。
+
+## Java bridge 源码实验
+
+`patches/java-bridge/<version>/direct-art-gc.patch` 分别基于固定官方 6.3.9（16 bundled 底座）和 7.0.13（17 外置 ESM 候选），独立改写 `ArtMethodMangler` 与 `class-factory` 原调用消费者：原方法承载替换，clone 供非虚原调用，失败清理和 revert 恢复相互联动。7.0.13 另将 Nterp 同步的 quick_code 操作对准原调用 clone，保留 ESM 导出与 index.js。两版专项合计 13 项，各有 39 个源码模型检查通过。不安装到用户客户端，不改变 global.Java，不自动进入 server/Gadget 构建。
+
+该实验保留 GetOat/GC 类引用同步、PrettyMethod 和 JDWP；不安装原方案的 quick dispatch/DoCall 重定向。只支持 Android >= 6.0 的 ARM/ARM64 非编译入口（含显式 Nterp clone 回退），拒绝 Xposed 包装和编译后入口。模型/语法/补丁重放不证明真实 ART、GC、JIT/AOT 或异常安全。
+
+```text
+python -I -B scripts/prepare_java_bridge.py --version 6.3.9 --source <完整官方6.3.9源码包目录> --out <新实验目录>
+python -I -B scripts/prepare_java_bridge.py --version 7.0.13 --source <完整官方7.0.13源码包目录> --out <另一新实验目录>
+```
+
+输入必须逐文件匹配固定包 SHA；输出含 `package/` 和 `bridge-report.json`，明确标注 source-only、未打包 runtime、未实机验证。17 外置打包仍待完成；17 源码适配不等于已被客户端消费。
+
+16 另有独立 `gum-runtime` recipe：新增默认空值选项 `nianchu_java_bridge_source`，跟踪完整实验包文件，在编译前严格验证/准备 bridge，并使用独立 `-direct-art-gc` 私有缓存。7 项集成模型测试覆盖 QJS/V8 调用顺序、默认缓存隔离、缺依赖安装及半修改缓存拒绝；编译器为测试替身，尚无真实 bundle、Android 二进制或运行证据。默认/当前 CI 未启用该实验。
+
+```text
+python -I -B scripts/apply_dependency_profile.py --component gum-runtime --version 16.7.19 --source <固定Gum源码根目录> --report <树外新报告>
+```
+
+源码 recipe 应用后，另用新的实验 builddir 设置 `-Dfrida-gum:nianchu_java_bridge_source=<prepare_java_bridge输出的package绝对路径>`。不得将实验报告或产物冒充默认兼容版；最终 collector 尚未接入该变体。
+
+## 静态 SDK 输入校验
+
+两版固定 GLib、releng/deps.toml、SDK 和 bootstrap 版本另见 `patches/dependencies.json`。`verify_dependency_sources.py` 只认证**尚未修改的输入 checkout**：核 HEAD、完整 Git blob 字节、递归子模块，拒绝修改、未跟踪/被忽略的旧构建文件和导出归档。输出明确标注未构建 SDK、未验证最终消费；此命令尚未接入 CI，也不是修改后 SDK 的验收器。
+
+```text
+python -I -B scripts/verify_dependency_sources.py --version 16.7.19 --releng <完整固定releng checkout> --glib <完整固定GLib checkout> --report <树外新报告>
+```
+
+GLib 独立 `thread-labels` recipe 只修改两处线程标签（`nianchu-worker`、`nianchu-dbus`）；每版保留 7 份固定源码 guard，日志域/GType 不变。releng 独立 `sdk-lock` recipe 在设置 `NIANCHU_SDK_LOCK=<绝对锁清单路径>` 后按 machine/prefix、版本、精确文件集和 SHA-256 验证已部署 SDK，失败不删目录、不走 SDK 下载兜底。该锁仅约束单一 SDK machine/prefix，不锁 toolchain，也不证明构建来源；当前未接入多 SDK/CI 配置链。
+
+```text
+python -I -B scripts/apply_dependency_profile.py --component glib --version 16.7.19 --source <固定GLib源码根目录> --report <树外新报告>
+python -I -B scripts/apply_dependency_profile.py --component releng --version 16.7.19 --source <固定releng源码根目录> --report <另一树外新报告>
+```
+
+上述两 component 也支持 17.25.2。上游未锁定 SDK 缓存仅凭 `VERSION.txt` 接受，旧安装 manifest 还能跳过构建。后续必须隔离 `FRIDA_DEPS` 和构建目录，核对修改后源码、库 hash、实际 machine-file/pkg-config 及链接输入；当前未完成 SDK 重编和 final link 消费验证，不能用旧预编译包替代。多文件替换不提供失败回滚；partial 状态会被后续检查拒绝。
 
 ## Zygisk
 

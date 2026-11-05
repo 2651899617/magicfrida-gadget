@@ -113,6 +113,23 @@ def final_outputs(build, targets):
     return result
 
 
+def artifact_variant(kind, features):
+    variant = '-entry-renamed' if 'agent-entrypoint-rename' in features else ''
+    if kind == 'gadget' and 'gadget-json-config' in features:
+        variant += '-json-config'
+    return variant
+
+
+def gadget_config_lookup(kind, features):
+    if kind != 'gadget':
+        return 'not-applicable'
+    sidecars = ['.config', '.config.so']
+    if 'gadget-json-config' in features:
+        sidecars.insert(1, '.json')
+    return {'android_sidecars': sidecars, 'inline_config': 'takes-precedence',
+            'source_contract': 'verified', 'runtime_lookup': 'not-tested'}
+
+
 def collect(build_dir, version, out, source_report, patch_report):
     manifest = json.loads((ROOT / 'versions.json').read_text(encoding='utf-8'))
     versions = [item for item in manifest['versions'] if item['version'] == version]
@@ -127,9 +144,15 @@ def collect(build_dir, version, out, source_report, patch_report):
     outputs = final_outputs(targets, expected['targets'])
     checked, final_paths = {}, set()
     for kind, path in outputs.items():
+        if kind == 'gadget' and path.name != 'nianchu-gadget.so':
+            raise ValueError('unexpected final Gadget filename: ' + path.name)
         if not path.is_absolute():
             path = build_dir / path
+        if path.is_symlink():
+            raise ValueError('final output must not be a symlink: ' + str(path))
         path = path.resolve()
+        if kind == 'gadget' and path.name != 'nianchu-gadget.so':
+            raise ValueError('unexpected resolved final Gadget filename: ' + path.name)
         if not path.is_relative_to(build_dir.resolve()) or not path.is_file():
             raise ValueError('missing final output in build directory: ' + str(path))
         if path in final_paths:
@@ -137,6 +160,13 @@ def collect(build_dir, version, out, source_report, patch_report):
         final_paths.add(path)
         data = path.read_bytes()
         info = elf.audit(data)
+        renamed_entry = 'agent-entrypoint-rename' in patches['features']
+        info['agent_entrypoint'] = {
+            'symbol': ('nianchu_agent_main' if renamed_entry else 'frida_agent_main') if kind == 'server' else None,
+            'scope': 'embedded-agent' if kind == 'server' else 'not-applicable-gadget',
+            'source_contract': 'verified' if kind == 'server' else 'not-applicable',
+            'final_symbol_lookup': 'not-tested' if kind == 'server' else 'not-applicable',
+        }
         if version.encode() not in data:
             raise ValueError('version string missing from final ' + kind)
         checked[kind] = (path, data, info)
@@ -146,14 +176,17 @@ def collect(build_dir, version, out, source_report, patch_report):
     artifacts = {}
     for kind, (path, data, info) in checked.items():
         label = 'gadget-zygisk' if kind == 'gadget' and 'zygisk-loader' in patches['features'] else kind
-        name = 'nianchu-' + label + '-' + version + '-android-arm64' + ('.so' if kind == 'gadget' else '')
+        variant = artifact_variant(kind, patches['features'])
+        name = 'nianchu-' + label + variant + '-' + version + '-android-arm64' + ('.so' if kind == 'gadget' else '')
         destination = out / name
         shutil.copyfile(path, destination)
         if kind == 'server':
             destination.chmod(0o755)
         if destination.read_bytes() != data or path.read_bytes() != data:
             raise ValueError('copy byte identity mismatch')
-        artifacts[kind] = {'file': name, 'final_target': expected['targets'][kind], **info}
+        artifacts[kind] = {'file': name, 'final_target': expected['targets'][kind],
+                           'final_filename': path.name,
+                           'gadget_config_lookup': gadget_config_lookup(kind, patches['features']), **info}
     report = {'schema': 1, 'version': version, 'source': source, 'patches': patches,
               'artifacts': artifacts, 'binary_modified': False,
               'validation': {'build_outputs': 'verified', 'protocol_handshake': 'not-tested',

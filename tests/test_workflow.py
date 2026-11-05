@@ -20,6 +20,26 @@ class WorkflowTests(unittest.TestCase):
                 actual = json.loads((output / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
                 expected = json.loads((ROOT / 'patches' / version / 'spec.json').read_text(encoding='utf-8'))
                 self.assertEqual(actual, expected)
+                for feature in (None, *actual['features']):
+                    name = (feature or 'compatible') + '.patch'
+                    self.assertEqual((output / 'patches' / version / name).read_bytes(),
+                                     (ROOT / 'patches' / version / name).read_bytes())
+                for entry in actual['files']:
+                    relative = Path('tests/fixtures') / version / entry['path']
+                    self.assertEqual((output / relative).read_bytes(), (ROOT / relative).read_bytes())
+
+    def test_git_preserves_entrypoint_patch_bytes(self):
+        for version in ('16.7.19', '17.25.2'):
+            path = ROOT / 'patches' / version / 'agent-entrypoint-rename.patch'
+            data = path.read_bytes()
+            self.assertIn(b' EXPORTS\r\n', data)
+            raw = subprocess.run(['git', 'hash-object', '--stdin', '--no-filters'], input=data,
+                                 cwd=ROOT, capture_output=True)
+            filtered = subprocess.run(['git', 'hash-object', '--stdin', '--path=' + path.relative_to(ROOT).as_posix()],
+                                      input=data, cwd=ROOT, capture_output=True)
+            self.assertEqual(raw.returncode, 0, raw.stderr)
+            self.assertEqual(filtered.returncode, 0, filtered.stderr)
+            self.assertEqual(filtered.stdout, raw.stdout)
 
     def test_jdk_is_configured_before_android_sdk(self):
         source = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')

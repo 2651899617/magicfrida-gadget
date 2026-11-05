@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "version": "7.0.13",
+  "profile": "direct-art-gc",
+  "source": {
+    "url": "https://registry.npmjs.org/frida-java-bridge/-/frida-java-bridge-7.0.13.tgz",
+    "integrity": "sha512-YSyKjxbxKnSi3KSUy9vciOvTOuq0RRh9dkxzkQVEdfIIZlw20zE8D3Cq9eL2FDqUVj4YKas6Wf09kCjL5zbffg==",
+    "shasum": "5d67beeae3c00e895c18c5f47f582480800c2c09",
+    "sha256": "0ae4e5393b5bf237ba7cfe23666248a7e6884cc9321ac0a77f073bcb30d951c0",
+    "license": "LGPL-2.0 WITH WxWindows-exception-3.1"
+  },
+  "package_files": {
+    "README.md": "27d9fbd0bad43f9ec68bd6b1ba091ca54335fb28a775efef17a98fdbfcdca59b",
+    "index.d.ts": "d13f96a494192f0bd53f97d34acd744418d9f49ff30946fc6665542decfe6ad8",
+    "index.js": "2dac3a8e2c7424965a6462c970a937d065a094d0e740a51a59373386836baa7c",
+    "lib/alloc.js": "6e075106d5fdcf8f214d19c0853d4189058fe84a8f125a42e12a14702411f842",
+    "lib/android.d.ts": "b9df496d65fbad4374780f94b1fa5e7aef15178736858e5dc68dc4e5a10a5c6f",
+    "lib/android.js": "ee119401893ab7353525fe181c99554cd13776c10a47e24ebf29c2d0de28a11c",
+    "lib/api.js": "e96838e75876ef864edbb64779ec8e21d9809b30fa4b2c90dde6be7d5a8c379a",
+    "lib/class-factory.js": "3905ae235bfd58fa4b1118075df781c090108c399ff19e093f568104dbb0dc3b",
+    "lib/class-model.js": "48f6b9da88ead79b109358fb7866aa5d10be1711c8a4a7693f876397b22b5010",
+    "lib/env.js": "eb30578946d7e0960e36d6304c791f4f80fea7e0087e0d8c7529117bd91cbf22",
+    "lib/jvm.js": "20bd6380e3f7962001f9ddae26bd58b7e993c3c8dbc295a5bbe46c7345e29495",
+    "lib/jvmti.js": "6338cb2a3564ea4b2eaac7282ae754e3a832b47926ae1b62d2dd6cbcdac013bc",
+    "lib/lru.js": "c2eea2d4a971a15802a867de03ac87ddf518ba253e48db44f13f5da7ff650f05",
+    "lib/machine-code.js": "755efcde08d7a8f91febe3f9b7ea67ea7a4d3e0d77a6c9fc5fd1840c769c5232",
+    "lib/memoize.js": "a211f4dd4fffca41614871cd52a29270cfbb7d6089b1ec73c2caec7c2e8a49c6",
+    "lib/mkdex.js": "6cdbf39ffe807879a232ba04e4c7e4ffdd5b30415d1fe1ee452f818a40d0d005",
+    "lib/result.js": "2ea95df312da5b30191fd51f21b8146c7f3bccd499e4f38d2cfd0624592fa57e",
+    "lib/types.js": "f596af52e3bd18594d0918df9355b0cd41ebdb9587223ac40674445f39eabd7f",
+    "lib/vm.js": "62b8ffe5274af8642a85823366a9ea782d409d3ae92ab5b7fd4aa4a4a4417a46",
+    "package.json": "d36213a115c2b0fb234779375deef66bdbfe1676e4f289525dd45492f41d2fc4"
+  },
+  "files": [
+    {
+      "path": "lib/android.js",
+      "upstream_sha256": "ee119401893ab7353525fe181c99554cd13776c10a47e24ebf29c2d0de28a11c",
+      "edits": [
+        {
+          "old": "class ArtMethodMangler {\n  constructor (opaqueMethodId) {\n    const methodId = unwrapMethodId(opaqueMethodId);\n\n    this.methodId = methodId;\n    this.originalMethod = null;\n    this.hookedMethodId = methodId;\n    this.replacementMethodId = null;\n\n    this.interceptor = null;\n  }\n\n  replace (impl, isInstanceMethod, argTypes, vm, api) {\n    const { kAccCompileDontBother, artNterpEntryPoint } = api;\n\n    this.originalMethod = fetchArtMethod(this.methodId, vm);\n\n    const originalFlags = this.originalMethod.accessFlags;\n\n    if ((originalFlags & kAccXposedHookedMethod) !== 0 && xposedIsSupported()) {\n      const hookInfo = this.originalMethod.jniCode;\n      this.hookedMethodId = hookInfo.add(2 * pointerSize).readPointer();\n      this.originalMethod = fetchArtMethod(this.hookedMethodId, vm);\n    }\n\n    const { hookedMethodId } = this;\n\n    const replacementMethodId = cloneArtMethod(hookedMethodId, vm);\n    this.replacementMethodId = replacementMethodId;\n\n    patchArtMethod(replacementMethodId, {\n      jniCode: impl,\n      accessFlags: ((originalFlags & ~(kAccCriticalNative | kAccFastNative | kAccNterpEntryPointFastPathFlag)) | kAccNative | kAccCompileDontBother) >>> 0,\n      quickCode: api.artClassLinker.quickGenericJniTrampoline,\n      interpreterCode: api.artInterpreterToCompiledCodeBridge\n    }, vm);\n\n    // Remove kAccFastInterpreterToInterpreterInvoke and kAccSkipAccessChecks to disable use_fast_path\n    // in interpreter_common.h\n    let hookedMethodRemovedFlags = kAccFastInterpreterToInterpreterInvoke | kAccSingleImplementation | kAccNterpEntryPointFastPathFlag;\n    if ((originalFlags & kAccNative) === 0) {\n      hookedMethodRemovedFlags |= kAccSkipAccessChecks;\n    }\n\n    patchArtMethod(hookedMethodId, {\n      accessFlags: ((originalFlags & ~(hookedMethodRemovedFlags)) | kAccCompileDontBother) >>> 0\n    }, vm);\n\n    const quickCode = this.originalMethod.quickCode;\n\n    // Replace Nterp quick entrypoints with art_quick_to_interpreter_bridge to force stepping out\n    // of ART's next-generation interpreter and use the quick stub instead.\n    if (artNterpEntryPoint !== null && quickCode.equals(artNterpEntryPoint)) {\n      patchArtMethod(hookedMethodId, {\n        quickCode: api.artQuickToInterpreterBridge\n      }, vm);\n    }\n\n    if (!isArtQuickEntrypoint(quickCode)) {\n      const interceptor = new ArtQuickCodeInterceptor(quickCode);\n      interceptor.activate(vm);\n\n      this.interceptor = interceptor;\n    }\n\n    artController.replacedMethods.set(hookedMethodId, replacementMethodId);\n\n    notifyArtMethodHooked(hookedMethodId, vm);\n  }\n\n  revert (vm) {\n    const { hookedMethodId, interceptor } = this;\n\n    patchArtMethod(hookedMethodId, this.originalMethod, vm);\n\n    artController.replacedMethods.delete(hookedMethodId);\n\n    if (interceptor !== null) {\n      interceptor.deactivate();\n\n      this.interceptor = null;\n    }\n  }\n\n  resolveTarget (wrapper, isInstanceMethod, env, api) {\n    return this.hookedMethodId;\n  }\n}\n",
+          "new": "class ArtMethodMangler {\n  constructor (opaqueMethodId) {\n    this.methodId = unwrapMethodId(opaqueMethodId);\n    this.requiresDirectCall = true;\n    this.hookedMethodId = this.methodId;\n    this.originalMethod = null;\n    this.replacementMethodId = null;\n  }\n\n  replace (impl, isInstanceMethod, argTypes, vm, api) {\n    if (this.originalMethod !== null) {\n      throw new Error('Direct ART method is already replaced');\n    }\n    if (!['arm', 'arm64'].includes(Process.arch) || getAndroidApiLevel() < 23) {\n      throw new Error('Direct ART experiment requires Android >= 6.0 on ARM');\n    }\n\n    const originalMethod = fetchArtMethod(this.hookedMethodId, vm);\n    const originalFlags = originalMethod.accessFlags;\n    if ((originalFlags & kAccXposedHookedMethod) !== 0 && xposedIsSupported()) {\n      throw new Error('Direct ART experiment does not support Xposed method wrappers');\n    }\n    const { kAccCompileDontBother, artNterpEntryPoint } = api;\n    const quickCode = originalMethod.quickCode;\n    const isNterp = artNterpEntryPoint !== null && quickCode.equals(artNterpEntryPoint);\n    if (!isNterp && !isArtQuickEntrypoint(quickCode)) {\n      throw new Error('Direct ART experiment requires a non-compiled method entrypoint');\n    }\n\n    const replacementMethodId = cloneArtMethod(this.hookedMethodId, vm);\n    let removedFlags = kAccFastInterpreterToInterpreterInvoke | kAccSingleImplementation | kAccNterpEntryPointFastPathFlag;\n    if ((originalFlags & kAccNative) === 0) {\n      removedFlags |= kAccSkipAccessChecks;\n    }\n    patchArtMethod(replacementMethodId, {\n      accessFlags: ((originalFlags & ~removedFlags) | kAccCompileDontBother) >>> 0,\n      quickCode: isNterp ? api.artQuickToInterpreterBridge : quickCode\n    }, vm);\n\n    // Keep clone class references synchronized by the existing GC hooks.\n    ensureArtKnowsHowToHandleReplacementMethods(vm);\n    artController.replacedMethods.set(this.hookedMethodId, replacementMethodId);\n    try {\n      patchArtMethod(this.hookedMethodId, {\n        jniCode: impl,\n        accessFlags: ((originalFlags & ~(kAccCriticalNative | kAccFastNative | kAccNterpEntryPointFastPathFlag)) |\n          kAccNative | kAccCompileDontBother) >>> 0,\n        quickCode: api.artClassLinker.quickGenericJniTrampoline,\n        interpreterCode: api.artInterpreterToCompiledCodeBridge\n      }, vm);\n    } catch (e) {\n      try {\n        patchArtMethod(this.hookedMethodId, originalMethod, vm);\n      } finally {\n        artController.replacedMethods.delete(this.hookedMethodId);\n      }\n      throw e;\n    }\n    this.originalMethod = originalMethod;\n    this.replacementMethodId = replacementMethodId;\n  }\n\n  revert (vm) {\n    if (this.originalMethod === null) {\n      return;\n    }\n    patchArtMethod(this.hookedMethodId, this.originalMethod, vm);\n    artController.replacedMethods.delete(this.hookedMethodId);\n    this.originalMethod = null;\n    this.replacementMethodId = null;\n  }\n\n  resolveTarget (wrapper, isInstanceMethod, env, api) {\n    if (this.replacementMethodId === null) {\n      throw new Error('Direct ART method has no original-call clone');\n    }\n    return this.replacementMethodId;\n  }\n}\n",
+          "count": 1
+        },
+        {
+          "old": "  is_replacement = g_hash_table_contains (replacements, method);",
+          "new": "  /* Direct profile: the redirected original, not its original-call clone, is native. */\n  is_replacement = g_hash_table_contains (methods, method);",
+          "count": 1
+        },
+        {
+          "old": "    quick_code = hooked_method + quick_code_offset;",
+          "new": "    quick_code = replacement_method + quick_code_offset;",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "lib/class-factory.js",
+      "upstream_sha256": "3905ae235bfd58fa4b1118075df781c090108c399ff19e093f568104dbb0dc3b",
+      "edits": [
+        {
+          "old": "          methodId = mangler.resolveTarget(receiver, isInstanceMethod, env, api);",
+          "new": "          methodId = mangler.resolveTarget(receiver, isInstanceMethod, env, api);\n          if (mangler.requiresDirectCall === true) {\n            strategy = STRATEGY_DIRECT;\n          }",
+          "count": 1
+        },
+        {
+          "old": "        mangler.replace(replacement, type === INSTANCE_METHOD, argTypes, vm, api);",
+          "new": "        try {\n          mangler.replace(replacement, type === INSTANCE_METHOD, argTypes, vm, api);\n        } catch (e) {\n          this._r = undefined;\n          throw e;\n        }",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "integration": "external-esm-source-only",
+  "runtime_tested": false,
+  "retained": [
+    "GetOatQuickMethodHeader",
+    "GC-class-reference-sync",
+    "PrettyMethod",
+    "JDWP"
+  ],
+  "unsupported": [
+    "Android-before-23",
+    "non-ARM",
+    "compiled-method-entrypoints",
+    "Xposed-wrappers"
+  ]
+}

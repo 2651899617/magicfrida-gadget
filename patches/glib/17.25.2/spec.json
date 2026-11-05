@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "version": "17.25.2",
+  "profile": "thread-labels",
+  "commit": "c366177b9292432a26f6903fa82a71d83e4927eb",
+  "archive_sha256": "e41f6f7feddc1d34d78b04f20ef453d8750f6fc34745ae9624c2991d1c33b56a",
+  "scope": "diagnostic-thread-labels-only",
+  "files": [
+    {
+      "path": "glib/gmain.c",
+      "upstream_sha256": "7a52660dff3793e2ee47d5f5ecf99d187f5c8b94fda15351732ec8f00fc1eeb4",
+      "edits": [
+        {
+          "old": "g_thread_new (\"gmain\", glib_worker_main, NULL)",
+          "new": "g_thread_new (\"nianchu-worker\", glib_worker_main, NULL)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "gio/gdbusprivate.c",
+      "upstream_sha256": "f837cfa961c5606b817518f2222dbfbdf8545cb5c52fbb1914891febabd38f3f",
+      "edits": [
+        {
+          "old": "g_thread_new (\"gdbus\",",
+          "new": "g_thread_new (\"nianchu-dbus\",",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "path": "glib/gthread.c",
+      "upstream_sha256": "0be8440c58b54113b21ad3d89c5b8638762271bbb2d53b65463aa89a8c721cbd",
+      "edits": []
+    },
+    {
+      "path": "gio/meson.build",
+      "upstream_sha256": "a7fe563792d2e4e96bb24649f5bfa679a3c256926fbc285077aa1435496a7f59",
+      "edits": []
+    },
+    {
+      "path": "gio/gdbusproxy.c",
+      "upstream_sha256": "9b4e5d6cf1e97066242baf1297bc15c85ff4360f9d4b866c096b47bc84255ffc",
+      "edits": []
+    },
+    {
+      "path": "gio/gdbusproxy.h",
+      "upstream_sha256": "ce74d4ed0ccdf6f19126f0a897f9d8294c94bf24d1f44f2b13fc9e36b47039a3",
+      "edits": []
+    },
+    {
+      "path": "LICENSES/LGPL-2.1-or-later.txt",
+      "upstream_sha256": "fa6f36630bb1e0c571d34b2bbdf188d08495c9dbf58f28cac112f303fc1f58fb",
+      "edits": []
+    }
+  ],
+  "runtime_tested": false,
+  "sdk_built": false,
+  "sdk_consumption_verified": false
+}

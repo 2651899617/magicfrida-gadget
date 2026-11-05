@@ -10,6 +10,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('collector', ROOT / 'scripts/collect_artifacts.py')
@@ -19,6 +20,7 @@ spec = importlib.util.spec_from_file_location('patches', ROOT / 'scripts/apply_p
 patches = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(patches)
 TARGETS = {'server': 'frida-server', 'gadget': 'frida-gadget'}
+FINAL_FILENAMES = {'server': 'server', 'gadget': 'nianchu-gadget.so'}
 
 
 def fixture(version='16.7.19'):
@@ -54,8 +56,9 @@ class ArtifactTests(unittest.TestCase):
         (build / 'meson-info').mkdir(parents=True)
         items = []
         for kind, target in TARGETS.items():
-            (build / kind).write_bytes(fixture(version))
-            items.append({'name': target, 'type': 'custom', 'installed': True, 'filename': [kind]})
+            filename = FINAL_FILENAMES[kind]
+            (build / filename).write_bytes(fixture(version))
+            items.append({'name': target, 'type': 'custom', 'installed': True, 'filename': [filename]})
         intro = build / 'meson-info/intro-targets.json'
         write_json(intro, items)
         expected = next(item for item in json.loads((ROOT / 'versions.json').read_text(encoding='utf-8'))['versions']
@@ -153,7 +156,7 @@ class ArtifactTests(unittest.TestCase):
                 for kind, artifact in report['artifacts'].items():
                     self.assertNotIn('gadget-zygisk', artifact['file'])
                     self.assertEqual((context.root / 'out' / artifact['file']).read_bytes(), fixture(version))
-                    self.assertEqual((context.build / kind).read_bytes(), fixture(version))
+                    self.assertEqual((context.build / FINAL_FILENAMES[kind]).read_bytes(), fixture(version))
                     self.assertEqual(artifact['sha256'], hashlib.sha256(fixture(version)).hexdigest())
                     self.assertEqual(artifact['final_target'], TARGETS[kind])
                     self.assertFalse(artifact['binary_modified'])
@@ -177,6 +180,152 @@ class ArtifactTests(unittest.TestCase):
                     context.patches = patches.apply(context.fixture_source, version, context.patch_path, selection)
                     self.assertNotIn('applied', [item['status'] for item in context.patches['files']])
                     self.collect(context, 'repeat-out')
+
+    def test_entrypoint_artifact_identity_and_module_payload_contract(self):
+        spec = importlib.util.spec_from_file_location('module_builder', ROOT / 'scripts/build_module.py')
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        for version in patches.VERSIONS:
+            for index, features in enumerate(((), ('agent-entrypoint-rename',), ('zygisk-loader',),
+                                              ('zygisk-loader', 'agent-entrypoint-rename'))):
+                with self.subTest(version=version, features=features):
+                    context = self.collection_fixture(version + '-entry-' + str(index), version, features)
+                    report = self.collect(context)
+                    renamed = 'agent-entrypoint-rename' in features
+                    for kind, artifact in report['artifacts'].items():
+                        self.assertEqual('-entry-renamed-' in artifact['file'], renamed)
+                        entry = artifact['agent_entrypoint']
+                        self.assertEqual(entry['symbol'], ('nianchu_agent_main' if renamed else 'frida_agent_main')
+                                         if kind == 'server' else None)
+                        self.assertEqual(entry['scope'], 'embedded-agent' if kind == 'server' else 'not-applicable-gadget')
+                        self.assertEqual(entry['final_symbol_lookup'], 'not-tested' if kind == 'server' else 'not-applicable')
+                        self.assertEqual(artifact['protected_markers']['frida_agent_main'], 1)
+                    if 'zygisk-loader' in features:
+                        manifest = context.root / 'out/manifest.json'
+                        payload, binary, provenance = builder.payload_from_manifest(manifest)
+                        self.assertEqual(payload.name, report['artifacts']['gadget']['file'])
+                        self.assertEqual(binary, fixture(version))
+                        self.assertEqual(provenance, report)
+                        wrong = copy.deepcopy(report)
+                        wrong['artifacts']['gadget']['file'] = wrong['artifacts']['gadget']['file'].replace(
+                            'gadget-zygisk', 'gadget-zygisk-entry-renamed') if not renamed else \
+                            wrong['artifacts']['gadget']['file'].replace('-entry-renamed', '')
+                        write_json(manifest, wrong)
+                        with self.assertRaisesRegex(ValueError, 'invalid final Gadget name'):
+                            builder.payload_from_manifest(manifest)
+
+    def test_json_gadget_and_server_identities(self):
+        for version in patches.VERSIONS:
+            for index, features in enumerate((('gadget-json-config',),
+                                              ('gadget-json-config', 'agent-entrypoint-rename'),
+                                              ('zygisk-loader', 'gadget-json-config'),
+                                              ('zygisk-loader', 'agent-entrypoint-rename', 'gadget-json-config'))):
+                with self.subTest(version=version, features=features):
+                    context = self.collection_fixture(version + '-json-' + str(index), version, features)
+                    report = self.collect(context)
+                    gadget = report['artifacts']['gadget']
+                    server = report['artifacts']['server']
+                    variant = '-entry-renamed' if 'agent-entrypoint-rename' in features else ''
+                    label = 'gadget-zygisk' if 'zygisk-loader' in features else 'gadget'
+                    self.assertEqual(gadget['file'], 'nianchu-' + label + variant + '-json-config-' + version + '-android-arm64.so')
+                    self.assertEqual(server['file'], 'nianchu-server' + variant + '-' + version + '-android-arm64')
+                    self.assertEqual(gadget['final_filename'], 'nianchu-gadget.so')
+                    self.assertEqual(server['gadget_config_lookup'], 'not-applicable')
+                    self.assertEqual(gadget['gadget_config_lookup'], {
+                        'android_sidecars': ['.config', '.json', '.config.so'],
+                        'inline_config': 'takes-precedence', 'source_contract': 'verified', 'runtime_lookup': 'not-tested'})
+
+    def test_module_rejects_wrong_json_identity_and_lookup_contract(self):
+        spec = importlib.util.spec_from_file_location('module_builder', ROOT / 'scripts/build_module.py')
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        for version in patches.VERSIONS:
+            for enabled in (False, True):
+                features = ['zygisk-loader', 'agent-entrypoint-rename'] + (['gadget-json-config'] if enabled else [])
+                context = self.collection_fixture(version + '-contract-' + str(enabled), version, features)
+                report = self.collect(context)
+                manifest = context.root / 'out/manifest.json'
+                self.assertEqual(builder.payload_from_manifest(manifest)[1], fixture(version))
+                artifact = report['artifacts']['gadget']
+                wrong_name = artifact['file'].replace('-json-config', '') if enabled else artifact['file'].replace(
+                    '-entry-renamed-', '-entry-renamed-json-config-')
+                variants = [('file', wrong_name, 'invalid final Gadget name'),
+                            ('final_filename', 'frida-gadget.so', 'final Gadget target/filename'),
+                            ('final_filename', 'libnianchu-gadget-raw.so', 'final Gadget target/filename'),
+                            ('final_target', 'nianchu-gadget-modulated', 'final Gadget target/filename'),
+                            ('gadget_config_lookup', 'not-applicable', 'config lookup contract'),
+                            ('gadget_config_lookup', {**artifact['gadget_config_lookup'], 'runtime_lookup': 'verified'}, 'config lookup contract'),
+                            ('gadget_config_lookup', {**artifact['gadget_config_lookup'], 'android_sidecars': ['.json']}, 'config lookup contract')]
+                for field, value, message in variants:
+                    with self.subTest(version=version, enabled=enabled, field=field, value=value):
+                        wrong = copy.deepcopy(report)
+                        wrong['artifacts']['gadget'][field] = value
+                        write_json(manifest, wrong)
+                        with self.assertRaisesRegex(ValueError, message):
+                            builder.payload_from_manifest(manifest)
+                wrong = copy.deepcopy(report)
+                del wrong['artifacts']['gadget']['gadget_config_lookup']
+                write_json(manifest, wrong)
+                with self.assertRaisesRegex(ValueError, 'config lookup contract'):
+                    builder.payload_from_manifest(manifest)
+
+    def test_final_gadget_filename_must_be_actual_source_output(self):
+        context = self.collection_fixture()
+        with mock.patch.object(collector.Path, 'is_symlink', autospec=True,
+                               side_effect=lambda path: path.name == 'nianchu-gadget.so'):
+            self.assert_rejected(context, 'must not be a symlink')
+        original_resolve = collector.Path.resolve
+
+        def resolve(path, *args, **kwargs):
+            if path == context.build / 'nianchu-gadget.so':
+                return context.build / 'libnianchu-gadget-raw.so'
+            return original_resolve(path, *args, **kwargs)
+
+        with mock.patch.object(collector.Path, 'resolve', autospec=True, side_effect=resolve):
+            self.assert_rejected(context, 'resolved final Gadget filename')
+        for filename in ('frida-gadget.so', 'libnianchu-gadget-raw.so', 'libnianchu-gadget-modulated.so', 'gadget'):
+            with self.subTest(filename=filename):
+                (context.build / filename).write_bytes(fixture())
+                items = copy.deepcopy(context.items)
+                items[1]['filename'] = [filename]
+                write_json(context.intro, items)
+                self.assert_rejected(context, 'final Gadget filename')
+
+    def test_json_module_zip_model_keeps_internal_payload(self):
+        spec = importlib.util.spec_from_file_location('module_builder', ROOT / 'scripts/build_module.py')
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        for version in patches.VERSIONS:
+            for renamed in (False, True):
+                features = ['zygisk-loader', 'gadget-json-config'] + (['agent-entrypoint-rename'] if renamed else [])
+                context = self.collection_fixture(version + '-zip-' + str(renamed), version, features)
+                report = self.collect(context)
+                ndk = context.root / 'model-ndk'
+                ndk.mkdir()
+                (ndk / 'source.properties').write_text('Pkg.Revision = ' + context.expected['ndk_revision'], encoding='utf-8')
+
+                def run(*args):
+                    if str(args[0]).endswith(('clang++', 'clang++.exe')):
+                        args[args.index('-o') + 1].write_bytes(b'SOURCE MODEL ONLY - NOT A WRAPPER ELF')
+                        return ''
+                    if '--dyn-syms' in args:
+                        symbol = 'zygisk_module_entry' if args[-1].name == 'arm64-v8a.so' else 'nianchu_gadget_init'
+                        return '1: 0 0 FUNC GLOBAL DEFAULT 1 ' + symbol + '\n'
+                    self.assertIn('--dynamic', args)
+                    return '(NEEDED) Shared library: [libc.so]\n'
+
+                out = context.root / 'module-model'
+                with mock.patch.object(builder, 'run', side_effect=run), mock.patch('builtins.print'):
+                    built = builder.build(ndk, out, context.root / 'out/manifest.json')
+                variant = '-entry-renamed' if renamed else ''
+                archive = out / ('nianchu-zygisk' + variant + '-json-config-' + version + '-android-arm64.zip')
+                with zipfile.ZipFile(archive) as package:
+                    self.assertEqual(package.read('gadget/libnianchu-gadget.so'), fixture(version))
+                    self.assertFalse(any(name.endswith(('.json', '.config.so')) and name.startswith('gadget/')
+                                         for name in package.namelist()))
+                    self.assertEqual(json.loads(package.read('build-report.json'))['gadget_manifest'], report)
+                self.assertEqual(built['zygisk_load'], 'not-tested')
+        print('PASS module zip source model: compiler/readelf stubbed; no real wrapper or Android claim')
 
     def test_single_applied_record_regression(self):
         context = self.collection_fixture()
@@ -375,9 +524,9 @@ class ArtifactTests(unittest.TestCase):
         for kind in TARGETS:
             for data in (b'not ELF', fixture('wrong-version')):
                 with self.subTest(kind=kind, data=data[:7]):
-                    (context.build / kind).write_bytes(data)
+                    (context.build / FINAL_FILENAMES[kind]).write_bytes(data)
                     self.assert_rejected(context)
-            (context.build / kind).write_bytes(fixture())
+            (context.build / FINAL_FILENAMES[kind]).write_bytes(fixture())
 
     def test_copy_corruption_and_source_race_rejected(self):
         context = self.collection_fixture()
@@ -392,7 +541,7 @@ class ArtifactTests(unittest.TestCase):
                 self.collect(context)
         self.assertFalse((context.root / 'out/manifest.json').exists())
         for kind in TARGETS:
-            self.assertEqual((context.build / kind).read_bytes(), fixture())
+            self.assertEqual((context.build / FINAL_FILENAMES[kind]).read_bytes(), fixture())
 
         def mutate_source(source, destination):
             original_copy(source, destination)

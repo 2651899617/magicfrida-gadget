@@ -12,6 +12,9 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('collector', ROOT / 'scripts/collect_artifacts.py')
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
 
 
 def run(*args):
@@ -26,9 +29,6 @@ def run(*args):
 
 def payload_from_manifest(path):
     data = json.loads(path.read_text(encoding='utf-8'))
-    module = importlib.util.spec_from_file_location('collector', ROOT / 'scripts/collect_artifacts.py')
-    collector = importlib.util.module_from_spec(module)
-    module.loader.exec_module(collector)
     version = data['version']
     expected = next(v for v in json.loads((ROOT / 'versions.json').read_text(encoding='utf-8'))['versions']
                     if v['version'] == version)
@@ -38,7 +38,8 @@ def payload_from_manifest(path):
         raise ValueError('module requires zygisk-loader source feature')
     artifact = data['artifacts']['gadget']
     name = artifact['file']
-    if Path(name).name != name or name != 'nianchu-gadget-zygisk-' + version + '-android-arm64.so':
+    variant = collector.artifact_variant('gadget', data['patches']['features'])
+    if Path(name).name != name or name != 'nianchu-gadget-zygisk' + variant + '-' + version + '-android-arm64.so':
         raise ValueError('invalid final Gadget name')
     payload = path.parent / name
     if payload.is_symlink() or not payload.is_file():
@@ -47,8 +48,10 @@ def payload_from_manifest(path):
     audit = collector.elf.audit(binary)
     if audit['sha256'] != artifact['sha256'] or audit['size'] != artifact['size']:
         raise ValueError('Gadget provenance hash/size mismatch')
-    if artifact['final_target'] != expected['targets']['gadget']:
-        raise ValueError('not a final Gadget target')
+    if artifact['final_target'] != expected['targets']['gadget'] or artifact.get('final_filename') != 'nianchu-gadget.so':
+        raise ValueError('not a final Gadget target/filename')
+    if artifact.get('gadget_config_lookup') != collector.gadget_config_lookup('gadget', data['patches']['features']):
+        raise ValueError('Gadget config lookup contract mismatch')
     if version.encode() not in binary or data.get('binary_modified') is not False:
         raise ValueError('invalid Gadget manifest/version')
     return payload, binary, data
@@ -103,7 +106,8 @@ def build(ndk, out, manifest=None):
     (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     if payload:
         version = provenance['version']
-        name = out / ('nianchu-zygisk-' + version + '-android-arm64.zip')
+        variant = collector.artifact_variant('gadget', provenance['patches']['features'])
+        name = out / ('nianchu-zygisk' + variant + '-' + version + '-android-arm64.zip')
         with zipfile.ZipFile(name, 'w', zipfile.ZIP_DEFLATED) as archive:
             for source, destination in ((library, 'zygisk/arm64-v8a.so'),
                                         (payload, 'gadget/libnianchu-gadget.so'),

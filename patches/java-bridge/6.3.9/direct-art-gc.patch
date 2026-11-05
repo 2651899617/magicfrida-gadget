@@ -1,0 +1,191 @@
+--- a/lib/android.js
++++ b/lib/android.js
+@@ -1614,7 +1614,8 @@
+ 
+   g_mutex_lock (&lock);
+ 
+-  is_replacement = g_hash_table_contains (replacements, method);
++  /* Direct profile: the redirected original, not its original-call clone, is native. */
++  is_replacement = g_hash_table_contains (methods, method);
+ 
+   g_mutex_unlock (&lock);
+ 
+@@ -3379,90 +3380,81 @@
+ 
+ class ArtMethodMangler {
+   constructor (opaqueMethodId) {
+-    const methodId = unwrapMethodId(opaqueMethodId);
+-
+-    this.methodId = methodId;
++    this.methodId = unwrapMethodId(opaqueMethodId);
++    this.requiresDirectCall = true;
++    this.hookedMethodId = this.methodId;
+     this.originalMethod = null;
+-    this.hookedMethodId = methodId;
+     this.replacementMethodId = null;
+-
+-    this.interceptor = null;
+   }
+ 
+   replace (impl, isInstanceMethod, argTypes, vm, api) {
++    if (this.originalMethod !== null) {
++      throw new Error('Direct ART method is already replaced');
++    }
++    if (!['arm', 'arm64'].includes(Process.arch) || getAndroidApiLevel() < 23) {
++      throw new Error('Direct ART experiment requires Android >= 6.0 on ARM');
++    }
++
++    const originalMethod = fetchArtMethod(this.hookedMethodId, vm);
++    const originalFlags = originalMethod.accessFlags;
++    if ((originalFlags & kAccXposedHookedMethod) !== 0 && xposedIsSupported()) {
++      throw new Error('Direct ART experiment does not support Xposed method wrappers');
++    }
+     const { kAccCompileDontBother, artNterpEntryPoint } = api;
+-
+-    this.originalMethod = fetchArtMethod(this.methodId, vm);
+-
+-    const originalFlags = this.originalMethod.accessFlags;
+-
+-    if ((originalFlags & kAccXposedHookedMethod) !== 0 && xposedIsSupported()) {
+-      const hookInfo = this.originalMethod.jniCode;
+-      this.hookedMethodId = hookInfo.add(2 * pointerSize).readPointer();
+-      this.originalMethod = fetchArtMethod(this.hookedMethodId, vm);
+-    }
+-
+-    const { hookedMethodId } = this;
+-
+-    const replacementMethodId = cloneArtMethod(hookedMethodId, vm);
++    const quickCode = originalMethod.quickCode;
++    const isNterp = artNterpEntryPoint !== null && quickCode.equals(artNterpEntryPoint);
++    if (!isNterp && !isArtQuickEntrypoint(quickCode)) {
++      throw new Error('Direct ART experiment requires a non-compiled method entrypoint');
++    }
++
++    const replacementMethodId = cloneArtMethod(this.hookedMethodId, vm);
++    let removedFlags = kAccFastInterpreterToInterpreterInvoke | kAccSingleImplementation | kAccNterpEntryPointFastPathFlag;
++    if ((originalFlags & kAccNative) === 0) {
++      removedFlags |= kAccSkipAccessChecks;
++    }
++    patchArtMethod(replacementMethodId, {
++      accessFlags: ((originalFlags & ~removedFlags) | kAccCompileDontBother) >>> 0,
++      quickCode: isNterp ? api.artQuickToInterpreterBridge : quickCode
++    }, vm);
++
++    // Keep clone class references synchronized by the existing GC hooks.
++    ensureArtKnowsHowToHandleReplacementMethods(vm);
++    artController.replacedMethods.set(this.hookedMethodId, replacementMethodId);
++    try {
++      patchArtMethod(this.hookedMethodId, {
++        jniCode: impl,
++        accessFlags: ((originalFlags & ~(kAccCriticalNative | kAccFastNative | kAccNterpEntryPointFastPathFlag)) |
++          kAccNative | kAccCompileDontBother) >>> 0,
++        quickCode: api.artClassLinker.quickGenericJniTrampoline,
++        interpreterCode: api.artInterpreterToCompiledCodeBridge
++      }, vm);
++    } catch (e) {
++      try {
++        patchArtMethod(this.hookedMethodId, originalMethod, vm);
++      } finally {
++        artController.replacedMethods.delete(this.hookedMethodId);
++      }
++      throw e;
++    }
++    this.originalMethod = originalMethod;
+     this.replacementMethodId = replacementMethodId;
+-
+-    patchArtMethod(replacementMethodId, {
+-      jniCode: impl,
+-      accessFlags: ((originalFlags & ~(kAccCriticalNative | kAccFastNative | kAccNterpEntryPointFastPathFlag)) | kAccNative | kAccCompileDontBother) >>> 0,
+-      quickCode: api.artClassLinker.quickGenericJniTrampoline,
+-      interpreterCode: api.artInterpreterToCompiledCodeBridge
+-    }, vm);
+-
+-    // Remove kAccFastInterpreterToInterpreterInvoke and kAccSkipAccessChecks to disable use_fast_path
+-    // in interpreter_common.h
+-    let hookedMethodRemovedFlags = kAccFastInterpreterToInterpreterInvoke | kAccSingleImplementation | kAccNterpEntryPointFastPathFlag;
+-    if ((originalFlags & kAccNative) === 0) {
+-      hookedMethodRemovedFlags |= kAccSkipAccessChecks;
+-    }
+-
+-    patchArtMethod(hookedMethodId, {
+-      accessFlags: ((originalFlags & ~(hookedMethodRemovedFlags)) | kAccCompileDontBother) >>> 0
+-    }, vm);
+-
+-    const quickCode = this.originalMethod.quickCode;
+-
+-    // Replace Nterp quick entrypoints with art_quick_to_interpreter_bridge to force stepping out
+-    // of ART's next-generation interpreter and use the quick stub instead.
+-    if (artNterpEntryPoint !== null && quickCode.equals(artNterpEntryPoint)) {
+-      patchArtMethod(hookedMethodId, {
+-        quickCode: api.artQuickToInterpreterBridge
+-      }, vm);
+-    }
+-
+-    if (!isArtQuickEntrypoint(quickCode)) {
+-      const interceptor = new ArtQuickCodeInterceptor(quickCode);
+-      interceptor.activate(vm);
+-
+-      this.interceptor = interceptor;
+-    }
+-
+-    artController.replacedMethods.set(hookedMethodId, replacementMethodId);
+-
+-    notifyArtMethodHooked(hookedMethodId, vm);
+   }
+ 
+   revert (vm) {
+-    const { hookedMethodId, interceptor } = this;
+-
+-    patchArtMethod(hookedMethodId, this.originalMethod, vm);
+-
+-    artController.replacedMethods.delete(hookedMethodId);
+-
+-    if (interceptor !== null) {
+-      interceptor.deactivate();
+-
+-      this.interceptor = null;
+-    }
++    if (this.originalMethod === null) {
++      return;
++    }
++    patchArtMethod(this.hookedMethodId, this.originalMethod, vm);
++    artController.replacedMethods.delete(this.hookedMethodId);
++    this.originalMethod = null;
++    this.replacementMethodId = null;
+   }
+ 
+   resolveTarget (wrapper, isInstanceMethod, env, api) {
+-    return this.hookedMethodId;
++    if (this.replacementMethodId === null) {
++      throw new Error('Direct ART method has no original-call clone');
++    }
++    return this.replacementMethodId;
+   }
+ }
+ 
+--- a/lib/class-factory.js
++++ b/lib/class-factory.js
+@@ -1727,7 +1727,12 @@
+         replacement._m = mangler;
+         this._r = replacement;
+ 
+-        mangler.replace(replacement, type === INSTANCE_METHOD, argTypes, vm, api);
++        try {
++          mangler.replace(replacement, type === INSTANCE_METHOD, argTypes, vm, api);
++        } catch (e) {
++          this._r = undefined;
++          throw e;
++        }
+ 
+         holder.$f._patchedMethods.add(this);
+       }
+@@ -1800,6 +1805,9 @@
+         } else {
+           const mangler = replacement._m;
+           methodId = mangler.resolveTarget(receiver, isInstanceMethod, env, api);
++          if (mangler.requiresDirectCall === true) {
++            strategy = STRATEGY_DIRECT;
++          }
+ 
+           if (isArtVm) {
+             const pendingCalls = replacement._c;

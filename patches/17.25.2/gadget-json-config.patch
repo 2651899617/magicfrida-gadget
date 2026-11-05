@@ -1,0 +1,18 @@
+--- a/subprojects/frida-core/lib/gadget/gadget.vala
++++ b/subprojects/frida-core/lib/gadget/gadget.vala
+@@ -678,7 +678,15 @@
+ #if ANDROID
+ 		if (!FileUtils.test (config_path, FileTest.EXISTS)) {
+ 			var ext_index = config_path.last_index_of_char ('.');
++			string json_path;
+ 			if (ext_index != -1) {
++				json_path = config_path[0:ext_index] + ".json";
++			} else {
++				json_path = config_path + ".json";
++			}
++			if (FileUtils.test (json_path, FileTest.EXISTS)) {
++				config_path = json_path;
++			} else if (ext_index != -1) {
+ 				config_path = config_path[0:ext_index] + ".config.so";
+ 			} else {
+ 				config_path = config_path + ".config.so";

@@ -1,0 +1,74 @@
+--- a/deps.py
++++ b/deps.py
+@@ -177,6 +177,59 @@
+     return location
+ 
+ 
++def _verify_locked_sdk(location: Path, machine: str, version: str, lock_path: Path):
++    import hashlib
++
++    if not location.is_absolute() or not lock_path.is_absolute():
++        raise ValueError("SDK lock requires absolute paths")
++    for path in (location, lock_path):
++        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
++            raise ValueError("SDK lock paths must not contain symlinks")
++    if not location.is_dir() or not lock_path.is_file():
++        raise ValueError("locked SDK or lock file is missing")
++    location = location.resolve()
++    lock_path = lock_path.resolve()
++    if lock_path.is_relative_to(location):
++        raise ValueError("SDK lock must be outside the SDK")
++    def unique_pairs(pairs):
++        result = {}
++        for key, value in pairs:
++            if key in result:
++                raise ValueError("duplicate SDK lock key")
++            result[key] = value
++        return result
++    lock = json.loads(lock_path.read_text(encoding="utf-8"), object_pairs_hook=unique_pairs)
++    if (not isinstance(lock, dict) or type(lock.get("schema")) is not int or lock["schema"] != 1
++            or lock.get("machine") != machine or lock.get("sdk_version") != version
++            or lock.get("prefix") != location.as_posix()):
++        raise ValueError("SDK lock identity mismatch")
++    files = lock.get("files")
++    if not isinstance(files, dict) or "VERSION.txt" not in files:
++        raise ValueError("SDK lock file manifest is missing")
++    for relative, sha in files.items():
++        parts = relative.split("/")
++        if (not relative or "\\" in relative or ":" in relative
++                or any(part in ("", ".", "..") for part in parts)
++                or not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
++            raise ValueError("invalid SDK lock file entry")
++    actual = {}
++    for path in location.rglob("*"):
++        if path.is_symlink():
++            raise ValueError("locked SDK contains a symlink")
++        if path.is_dir():
++            continue
++        if not path.is_file():
++            raise ValueError("locked SDK contains a special file")
++        actual[path.relative_to(location).as_posix()] = path
++    if set(actual) != set(files):
++        raise ValueError("locked SDK file set mismatch")
++    for relative, path in actual.items():
++        if hashlib.sha256(path.read_bytes()).hexdigest() != files[relative]:
++            raise ValueError("locked SDK file hash mismatch: " + relative)
++    if (location / "VERSION.txt").read_text(encoding="utf-8").strip() != version:
++        raise ValueError("locked SDK version mismatch")
++
++
+ def sync(bundle: Bundle,
+          machine: MachineSpec,
+          location: Path,
+@@ -186,6 +239,11 @@
+ 
+     if version is None:
+         version = load_dependency_parameters().deps_version
++
++    lock = os.environ.get("NIANCHU_SDK_LOCK")
++    if bundle == Bundle.SDK and lock is not None:
++        _verify_locked_sdk(location, machine.identifier, version, Path(lock))
++        return state
+ 
+     bundle_nick = bundle.name.lower() if bundle != Bundle.SDK else bundle.name
+ 

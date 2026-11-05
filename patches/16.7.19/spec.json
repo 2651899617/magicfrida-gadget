@@ -8,7 +8,9 @@
   "features": [
     "exit-monitor-off",
     "signal-interposition-off",
-    "zygisk-loader"
+    "zygisk-loader",
+    "agent-entrypoint-rename",
+    "gadget-json-config"
   ],
   "java_bridge": {
     "mode": "bundled-6.3.9",
@@ -48,7 +50,15 @@
           "count": 2
         }
       ],
-      "optional": {}
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
     },
     {
       "path": "subprojects/frida-core/lib/gadget/gadget-glue.c",
@@ -57,6 +67,11 @@
         {
           "old": "g_thread_new (\"frida-gadget\",",
           "new": "g_thread_new (\"nianchu-gadget\",",
+          "count": 1
+        },
+        {
+          "old": "#include \"frida-gadget.h\"",
+          "new": "#include \"nianchu-gadget.h\"",
           "count": 1
         }
       ],
@@ -144,6 +159,510 @@
           }
         ]
       }
+    },
+    {
+      "path": "subprojects/frida-core/src/linux/frida-helper-process.vala",
+      "upstream_sha256": "f2d119388031073c930ed67d3e9db18abdf3c17b80f0feb82cbcbe6fb1c3d190",
+      "edits": [
+        {
+          "old": "make_temporary_helper (\"frida-helper-32\",",
+          "new": "make_temporary_helper (\"nianchu-helper-32\",",
+          "count": 1
+        },
+        {
+          "old": "make_temporary_helper (\"frida-helper-64\",",
+          "new": "make_temporary_helper (\"nianchu-helper-64\",",
+          "count": 1
+        },
+        {
+          "old": "string socket_path = \"/frida-\" + Uuid.string_random ();",
+          "new": "string socket_path = \"/nianchu-\" + Uuid.string_random ();",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/linux/frida-helper-backend.vala",
+      "upstream_sha256": "252265fb5fb0a3254aa03c3ff65dbb6ae4c4df27a5448204e6859346a579d96e",
+      "edits": [
+        {
+          "old": "return \"/frida-\" + Uuid.string_random ();",
+          "new": "return \"/nianchu-\" + Uuid.string_random ();",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-gum/gum/gum.c",
+      "upstream_sha256": "7cb75dacbe8fe3402a1675ac1828a472c84b4fc19f9ab83e0fec4a8ad674434c",
+      "edits": [
+        {
+          "old": "g_set_prgname (\"frida\");",
+          "new": "g_set_prgname (\"nianchu\");",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/agent-glue.c",
+      "upstream_sha256": "2553282710ca92318d4922c161bc84837740e16816063c62b5e25e20607dddac",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/agent.vala",
+      "upstream_sha256": "e7c285fb7f8cff34dd34d23d27e3ffe41c28edc8e7d46ecf5fb3aeec2107b78d",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "\tpublic void main (string agent_parameters,",
+            "new": "\t[CCode (cname = \"nianchu_agent_main\")]\n\tpublic void main (string agent_parameters,",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/frida-agent-android.version",
+      "upstream_sha256": "7e4ab5380651cccb4ae34edf71324b4e6ebb8a8775c45fe4a01fedaa1ec86ebe",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/frida-agent-x86.symbols",
+      "upstream_sha256": "674d01925b196f1c6ef8da197360e86b06193b9287b8fcae10f48faf48b9743c",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/frida-agent.def",
+      "upstream_sha256": "61b6024b1a3844e8ba3f52f9119041c08e52bc50861021f7f67d0c7c1c27b25f",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/frida-agent.symbols",
+      "upstream_sha256": "98c75ce7e38dc6460fcd749f602509e5d1a324b2f31efbb4023d77d70a9b0568",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/frida-agent.version",
+      "upstream_sha256": "06ae2c5d0dcdebe6fd5ef7a3a8a4d2a8401d974fb47aa2829952a3a1f2bbc81f",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/agent/meson.build",
+      "upstream_sha256": "ecac57c65158fd30018e651c136aa4dd8f15f7dfb4e645e94dbbf51cfbbe9968",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/src/agent-container.vala",
+      "upstream_sha256": "53bafaf104563a68916d16859bcf39a58e839ffcad6705b4d1d2d4872660a2eb",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/src/darwin/darwin-host-session.vala",
+      "upstream_sha256": "5cd0b1801991d3b062503ba953dad8673272037deeaf6bc734662e821262972f",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/src/freebsd/freebsd-host-session.vala",
+      "upstream_sha256": "e0b85e18fe31b871da8a8be03e5547397f06b457c13b3e87f228456d59ccae7b",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/src/qnx/qnx-host-session.vala",
+      "upstream_sha256": "a47a271cabb8055e481770fdcc90723c02e70e45438fc185384a2ca1d9a63d2c",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/src/windows/windows-host-session.vala",
+      "upstream_sha256": "07401a5b9d0f34a186e9818dee347d3b1d3f26f0492f7dbc55587ef6faf7dedf",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/Makefile.android-arm.mk",
+      "upstream_sha256": "1f5f7b374f6dc5646b410d20b9cd218f2b01533b9ccd429ea15eb6a77c19d1dd",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/Makefile.android-arm64.mk",
+      "upstream_sha256": "a59730a70ba5dcfce21d2d481a723e9a7f4caba5f7bd375f9beff3056a6baa10",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/Makefile.android-x86.mk",
+      "upstream_sha256": "186165206352d97033223fd5faa99d9b45abe2c14600ea1943d2a11e26697fea",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/Makefile.android-x86_64.mk",
+      "upstream_sha256": "9959985f88f42e76edba05d0e2d086828c0be75a58e55688804bb598beb8adb6",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/Makefile.qnx.mk",
+      "upstream_sha256": "8960c5a363947ef095f6dce57bdb78565f5a0804905a0269f38d4e0d85bd57da",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/agent.def",
+      "upstream_sha256": "61b6024b1a3844e8ba3f52f9119041c08e52bc50861021f7f67d0c7c1c27b25f",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/resident-agent.c",
+      "upstream_sha256": "403f066ad3927dc826939f913ad6dcfcd4b411d89f4f503db9f5776a8e41f7f4",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/labrats/simple-agent.c",
+      "upstream_sha256": "fe407f245ae7b72afb8465ebb7db9a1496a4c7af753a5e026ff5768746407263",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/test-agent.vala",
+      "upstream_sha256": "b0f964ac2daf92d70ce28324da0eab868779442a5bb961d3a54575c0c0fb3279",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/tests/test-injector.vala",
+      "upstream_sha256": "74cf5135d0b999cc42ceaf622e1be18bbde6e0173327a50a5388359510557275",
+      "edits": [],
+      "optional": {
+        "agent-entrypoint-rename": [
+          {
+            "old": "frida_agent_main",
+            "new": "nianchu_agent_main",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/src/frida-glue.c",
+      "upstream_sha256": "07cb65c4dd1865a60481dd3ffbfe25da4610625b4b15bc6aea9c86eb38745cc2",
+      "edits": [
+        {
+          "old": "g_thread_new (\"frida-main-loop\",",
+          "new": "g_thread_new (\"nianchu-main\",",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/gadget/gadget.vala",
+      "upstream_sha256": "8fa9f99b54bf3b15d9c91a245983f798f2d781e29e0f8354eaa92411e87414ba",
+      "edits": [
+        {
+          "old": "\"frida-gadget-tcp-%u\".printf (listen_port)",
+          "new": "\"nianchu-t%u\".printf (listen_port)",
+          "count": 1
+        },
+        {
+          "old": "\"frida-gadget-unix\"",
+          "new": "\"nianchu-unix\"",
+          "count": 1
+        }
+      ],
+      "optional": {
+        "gadget-json-config": [
+          {
+            "old": "\t\tif (!FileUtils.test (config_path, FileTest.EXISTS)) {\n\t\t\tvar ext_index = config_path.last_index_of_char ('.');\n\t\t\tif (ext_index != -1) {\n\t\t\t\tconfig_path = config_path[0:ext_index] + \".config.so\";\n\t\t\t} else {\n\t\t\t\tconfig_path = config_path + \".config.so\";\n\t\t\t}\n\t\t}",
+            "new": "\t\tif (!FileUtils.test (config_path, FileTest.EXISTS)) {\n\t\t\tvar ext_index = config_path.last_index_of_char ('.');\n\t\t\tstring json_path;\n\t\t\tif (ext_index != -1) {\n\t\t\t\tjson_path = config_path[0:ext_index] + \".json\";\n\t\t\t} else {\n\t\t\t\tjson_path = config_path + \".json\";\n\t\t\t}\n\t\t\tif (FileUtils.test (json_path, FileTest.EXISTS)) {\n\t\t\t\tconfig_path = json_path;\n\t\t\t} else if (ext_index != -1) {\n\t\t\t\tconfig_path = config_path[0:ext_index] + \".config.so\";\n\t\t\t} else {\n\t\t\t\tconfig_path = config_path + \".config.so\";\n\t\t\t}\n\t\t}",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "path": "subprojects/frida-core/lib/gadget/meson.build",
+      "upstream_sha256": "1c1cbe232bd5eb383c5d1bfbcedfe19fd6a844786e35d519e1e5d840b608ae3b",
+      "edits": [
+        {
+          "old": "shared_library('frida-gadget-raw',",
+          "new": "shared_library('nianchu-gadget-raw',",
+          "count": 1
+        },
+        {
+          "old": "vala_header: 'frida-gadget.h'",
+          "new": "vala_header: 'nianchu-gadget.h'",
+          "count": 1
+        },
+        {
+          "old": "custom_target('frida-gadget-modulated',",
+          "new": "custom_target('nianchu-gadget-modulated',",
+          "count": 1
+        },
+        {
+          "old": "output: 'libfrida-gadget-modulated' + shlib_suffix",
+          "new": "output: 'libnianchu-gadget-modulated' + shlib_suffix",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/gadget/gadget-darwin.m",
+      "upstream_sha256": "ead038f412e34003df70fc9388f1b773955cdd51da98cfe1bb1e7606c77a0855",
+      "edits": [
+        {
+          "old": "#include \"frida-gadget.h\"",
+          "new": "#include \"nianchu-gadget.h\"",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/meson.build",
+      "upstream_sha256": "f4b3a2e60bc4f9ca3e82991fb1a769d23d8ed2f5554bfa8c1605bd8e79e6dace",
+      "edits": [
+        {
+          "old": "gadget_name = 'frida-gadget' + shlib_suffix",
+          "new": "gadget_name = ((host_os_family in ['windows', 'darwin']) ? 'frida-gadget' : 'nianchu-gadget') + shlib_suffix",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/compat/build.py",
+      "upstream_sha256": "6a35a0ba7f3b37de499475f88b34ae2d9997d2122b63cb779b6f54347b65616a",
+      "edits": [
+        {
+          "old": "GADGET_FILE_ELF = Path(\"lib\") / \"gadget\" / \"frida-gadget.so\"",
+          "new": "GADGET_FILE_ELF = Path(\"lib\") / \"gadget\" / \"nianchu-gadget.so\"",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/lib/payload/portal-client.vala",
+      "upstream_sha256": "bcd48bbd8e3d0c1c32e0e341b35dc76b4fc8f9a14f890cd6c948d04b20b8571a",
+      "edits": [
+        {
+          "old": "\"Emulated realm is not supported by frida-gadget\"",
+          "new": "\"Emulated realm is not supported by nianchu-gadget\"",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/droidy/injector.vala",
+      "upstream_sha256": "836b0a8d54af468a7692b941f20cf98133232d7086ffd79a479fc88090ca9bee",
+      "edits": [
+        {
+          "old": "\"/data/local/tmp/frida-gadget-\"",
+          "new": "\"/data/local/tmp/nianchu-gadget-\"",
+          "count": 2
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-core/src/fruity/injector.vala",
+      "upstream_sha256": "805b6f1d3c258e7e03241324d7feb0daf0457b7942bc91cba5d7e491f4b0bf22",
+      "edits": [
+        {
+          "old": "/^frida-gadget-tcp-(\\d+)$/.match",
+          "new": "/^(?:frida-gadget-tcp-|nianchu-t)(\\d+)$/.match",
+          "count": 1
+        }
+      ],
+      "optional": {}
     }
   ]
 }
