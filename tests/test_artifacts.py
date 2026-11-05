@@ -370,6 +370,7 @@ class ArtifactTests(unittest.TestCase):
             def run(*args):
                 if str(args[0]).endswith(('clang++', 'clang++.exe')):
                     self.assertIn(out / 'module.cpp', args)
+                    self.assertIn('-I' + str(ROOT / 'module/src'), args)
                     self.assertIn('"' + entry + '"', (out / 'module.cpp').read_text())
                     args[args.index('-o') + 1].write_bytes(b'MODEL WRAPPER')
                     return ''

@@ -105,7 +105,7 @@ def build(ndk, out, manifest=None):
     run(compiler, '--target=aarch64-linux-android26', '-std=c++17', '-shared', '-fPIC', '-O2',
         '-fno-exceptions', '-fno-rtti', '-fno-threadsafe-statics', '-nostdlib++', '-fvisibility=hidden', '-Wall', '-Wextra', '-Werror',
         '-Wl,--no-undefined', '-Wl,-z,relro,-z,now', '-I' + str(ROOT / 'module/include'),
-        '-I' + str(out), generated_source, '-llog', '-ldl', '-o', library)
+        '-I' + str(ROOT / 'module/src'), '-I' + str(out), generated_source, '-llog', '-ldl', '-o', library)
     readelf = tools / ('llvm-readelf' + suffix)
     symbols = run(readelf, '--dyn-syms', '--wide', library)
     if not re.search(r'\bGLOBAL\s+DEFAULT\s+\d+\s+zygisk_module_entry\s*$', symbols, re.M):
