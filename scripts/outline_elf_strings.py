@@ -55,7 +55,8 @@ _GNU_ATTRIBUTES = frozenset('''
     diagnose_if enum_extensibility error externally_visible fallthrough flatten
     format format_arg gnu_inline hot leaf malloc may_alias minsize mode no_sanitize
     no_sanitize_address no_sanitize_thread no_sanitize_undefined no_stack_protector
-    nodebug noinline nonnull noreturn nothrow optimize overloadable packed
+    neon_polyvector_type neon_vector_type nodebug noinline nonnull noreturn nothrow
+    optimize overloadable packed
     pass_dynamic_object_size pass_object_size pure returns_nonnull section sentinel
     swift_name target tls_model transparent_union type_visibility unavailable unused used
     vector_size visibility warn_unused_result warning weak weak_import weakref

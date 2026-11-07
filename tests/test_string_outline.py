@@ -590,6 +590,72 @@ void f(void) {
         self.assertIn('declaration_attributes', reasons)
         self.assertIn('resource_storage_attributes', reasons)
 
+    def test_neon_typedef_shadow_preserves_attribute_bytes_and_offsets(self):
+        source = r'''
+typedef signed char int8_t;
+typedef unsigned char uint8_t;
+typedef short int16_t;
+typedef int int32_t;
+typedef unsigned char poly8_t;
+typedef unsigned short poly16_t;
+typedef __attribute__((neon_vector_type(8))) int8_t int8x8_t;
+typedef __attribute__((__neon_vector_type__(16))) uint8_t uint8x16_t;
+typedef __attribute__((neon_vector_type(4))) int16_t int16x4_t;
+typedef __attribute__((neon_vector_type(2))) int32_t int32x2_t;
+typedef __attribute__((neon_polyvector_type(8))) poly8_t poly8x8_t;
+typedef __attribute__((__neon_polyvector_type__(4))) poly16_t poly16x4_t;
+'''.replace('\n', '\r\n').encode()
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                transformer = outline.Transformer(source, language, 'neon.i')
+                self.assertEqual(len(transformer.shadow.view), len(source))
+                self.assertEqual([i for i, c in enumerate(source) if c in (10, 13)],
+                                 [i for i, c in enumerate(transformer.shadow.view) if c in (10, 13)])
+                self.assertFalse(transformer.root.has_error)
+                output, report = transformer.run()
+                self.assertEqual(output, source)
+                self.assertEqual(report['parser_normalization']['kind_counts']['attribute'], 6)
+                self.assertEqual(report['summary']['heap_buffers'], 0)
+
+    def test_neon_typedef_slots_and_numeric_resource_references_remain_unsafe(self):
+        source = GLIB_HOST + r'''
+typedef signed char Byte;
+typedef __attribute__((neon_vector_type(8))) Byte Vector;
+typedef unsigned char PolynomialByte;
+typedef __attribute__((neon_polyvector_type(8))) PolynomialByte Polynomial;
+typedef Vector VectorAlias;
+static const VectorAlias *vectors=(const VectorAlias *)"FridaVectorData";
+static const Polynomial *polynomials=(const Polynomial *)"FridaPolynomialData";
+static const unsigned char gumjs_neon_bytecode[]={70,114,105,100,97,0,0,0};
+static const Vector *metadata=(const Vector *)gumjs_neon_bytecode;
+const unsigned char *bytes(void){return gumjs_neon_bytecode;}
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                output, report = self.transform(source, language)
+                self.assertEqual(output, source.encode())
+                self.assertEqual(report['summary']['heap_buffers'], 0)
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
+                self.assertEqual(report['summary']['resources_transformed'], 0)
+                self.assertEqual({item['reason'] for item in report['skipped']},
+                                 {'type_or_field_attributes',
+                                  'resource_reference_type_or_field_attributes'})
+
+    def test_malformed_neon_attribute_and_unrelated_syntax_fail_closed(self):
+        samples = (
+            'typedef __attribute__((neon_vector_type(8 +))) signed char V;',
+            'typedef __attribute__((neon_polyvector_type(8 +))) unsigned char P;',
+            'typedef __attribute__((neon_vector_type(8))) signed char V',
+            'typedef __attribute__((unknown_neon_vector_type(8))) signed char V;',
+            'typedef __attribute__((neon_vector_type(8))) signed char V; void f( {',
+            'typedef __attribute__((neon_polyvector_type(8))) unsigned char P; int n=+;',
+        )
+        for language in ('c', 'cpp'):
+            for source in samples:
+                with self.subTest(language=language, source=source), self.assertRaises(outline.OutlineError) as caught:
+                    self.transform(source, language)
+                self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_does_not_parse')
+
     def test_hidden_type_operands_resource_reference_and_unknown_types(self):
         source = GLIB_HOST + r'''
 static const unsigned char gumjs_typed_bytecode[]={70,114,105,100,97};
@@ -1117,6 +1183,82 @@ int main(void){
         self.assertIn(b'=delete;', output)
         self.assertIn(b'op.operator&()==9', output)
         self.compile_run(output, 'cpp')
+
+    def test_real_ndk_neon_headers_and_vector_semantics_compile_c_and_cpp(self):
+        clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
+        if not clang:
+            if os.environ.get('STRING_OUTLINE_REQUIRE_ANDROID') == '1':
+                self.fail('set STRING_OUTLINE_ANDROID_CLANG to the installed NDK clang')
+            self.skipTest('installed Android NDK clang not selected')
+        source = r'''#include <arm_neon.h>
+#include <stddef.h>
+typedef __SIZE_TYPE__ gsize;
+void *g_malloc(gsize);
+int g_once_init_enter(volatile gsize *);
+void g_once_init_leave(volatile gsize *,gsize);
+#ifdef __cplusplus
+static_assert(sizeof(uint8x16_t)==16,"NEON vector width");
+static_assert(sizeof(poly8x8_t)==8,"NEON polynomial width");
+#else
+_Static_assert(sizeof(uint8x16_t)==16,"NEON vector width");
+_Static_assert(sizeof(poly8x8_t)==8,"NEON polynomial width");
+#endif
+static const unsigned char gumjs_neon_bytecode[]={70,114,105,100,97,0,0,0};
+static const uint8x8_t *metadata=(const uint8x8_t *)gumjs_neon_bytecode;
+const uint8x8_t *vectors(void){return metadata;}
+const unsigned char *bytes(void){return gumjs_neon_bytecode;}
+const char *name(void){return "FridaNeonRuntime";}
+int vector_operation(unsigned char *output){
+  uint8x16_t vector=vdupq_n_u8(7);
+  poly8x8_t polynomial=vdup_n_p8((poly8_t)3);
+  vst1q_u8(output,vector);
+  return output[15]+(int)vget_lane_p8(polynomial,0);
+}
+'''
+        targets = (
+            ('aarch64-linux-android21', (), 183),
+            ('armv7a-linux-androideabi19', ('-mfpu=neon', '-mfloat-abi=softfp'), 40),
+        )
+        with tempfile.TemporaryDirectory(prefix='nso-neon-') as directory:
+            root = Path(directory)
+            raw = root/'unit.c'
+            raw.write_text(source, encoding='utf-8')
+            for target, target_flags, machine in targets:
+                for language in ('c', 'cpp'):
+                    with self.subTest(target=target, language=language):
+                        stem = target+'-'+language
+                        unit, baseline, obj = root/(stem+'.i'), root/(stem+'-baseline.o'), root/(stem+'.o')
+                        standard = '-std=gnu99' if language == 'c' else '-std=gnu++17'
+                        semantic = [clang, '--target='+target, standard, *target_flags,
+                                    '-Oz', '-fPIC', '-Werror']
+                        command = [*semantic, '-x', 'c' if language == 'c' else 'c++',
+                                   '-E', '-P', str(raw), '-o', str(unit)]
+                        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                        original = unit.read_bytes()
+                        final_language = 'cpp-output' if language == 'c' else 'c++-cpp-output'
+                        command = [*semantic, '-x', final_language, '-c', str(unit), '-o', str(baseline)]
+                        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                        output, report = self.transform(original, language)
+                        self.assertTrue(report['ok'])
+                        self.assertGreater(report['parser_normalization']['kind_counts']['attribute'], 0)
+                        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                        self.assertEqual(report['summary']['resources_transformed'], 0)
+                        self.assertIn('resource_reference_type_or_field_attributes',
+                                      {item['reason'] for item in report['skipped']})
+                        self.assertIn(b'neon_vector_type', output)
+                        self.assertIn(b'neon_polyvector_type', output)
+                        self.assertEqual(original.count(b'neon_vector_type'), output.count(b'neon_vector_type'))
+                        self.assertEqual(original.count(b'neon_polyvector_type'), output.count(b'neon_polyvector_type'))
+                        unit.write_bytes(output)
+                        command = [*semantic, '-x', final_language, '-c', str(unit), '-o', str(obj)]
+                        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                        for object_path in (baseline, obj):
+                            data = object_path.read_bytes()
+                            self.assertEqual(data[:4], b'\x7fELF')
+                            self.assertEqual(int.from_bytes(data[18:20], 'little'), machine)
 
     def test_real_ndk_libcpp_type_traits_preprocess_and_original_token_compile(self):
         clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
