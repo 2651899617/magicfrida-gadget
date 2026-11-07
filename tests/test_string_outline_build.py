@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Offline wrapper tests; stub outlining does not depend on the real transformer.
+"""Wrapper command contracts plus real outliner/native heap-restore integration.
 
+Stub outlining keeps command/dep/security cases independent of the transformer.
 Optional NIANCHU_STRING_OUTLINE_TEST_REPORT_DIR preserves JSON evidence outside
 all test source trees. NIANCHU_TEST_CLANG / NIANCHU_TEST_CLANGXX opt in to real
-Android C/C++ object-only smoke checks (no product build, links, CI, or ADB).
+Android C/C++ object-only checks (no product build, links, CI, or ADB).
 """
 import ast
 import hashlib
@@ -43,6 +44,7 @@ p.add_argument('--input', required=True)
 p.add_argument('--output', required=True)
 p.add_argument('--report', required=True)
 p.add_argument('--language', required=True, choices=('c','cpp'))
+p.add_argument('--cpp-opaque-root', action='append', default=[])
 a = p.parse_args()
 source = Path(a.input).read_bytes()
 result = source.replace(b'"frida-outline-me"', b'"nianchu-outline-me"')
@@ -455,6 +457,24 @@ class OutlineBuildTests(unittest.TestCase):
                 self.assertEqual(self.input.read_bytes(), before)
                 path.write_bytes(original)
 
+    def test_installed_cpp_header_policy_drift_fails_before_compiler(self):
+        original = self.config.read_bytes()
+        for policy in (None, 'legacy-opaque-every-header'):
+            with self.subTest(policy=policy):
+                config = json.loads(original)
+                if policy is None:
+                    config.pop('cpp_header_policy')
+                else:
+                    config['cpp_header_policy'] = policy
+                self.config.write_text(json.dumps(config), encoding='utf-8')
+                result = self.run_wrapper(self.compile_flags())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('unsupported C++ header origin policy', result.stderr)
+                self.assertEqual(self.calls(), [])
+                with self.assertRaisesRegex(installer.InstallationError, r'unsupported installed C\+\+ header origin policy'):
+                    installer.validate_build(self.state, self.build)
+        self.config.write_bytes(original)
+
     def test_installer_idempotent_env_and_both_pinned_releng_source_contracts(self):
         before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in
                   (self.config, self.state / 'string_outline_compiler.py', self.env_output)}
@@ -539,6 +559,173 @@ class OutlineBuildTests(unittest.TestCase):
         self.assertEqual(result['versions'], installer.PARSER_PINS)
         self.assertTrue(result['isolated'])
         self.assertEqual(result['executable'], sys.executable)
+
+    def test_real_outliner_wrapper_native_heap_restore_and_original_dependencies(self):
+        compilers = {'c': os.environ.get('STRING_OUTLINE_CC') or shutil.which('gcc') or shutil.which('cc'),
+                     'cpp': os.environ.get('STRING_OUTLINE_CXX') or shutil.which('g++') or shutil.which('c++')}
+        if not all(compilers.values()):
+            if os.environ.get('STRING_OUTLINE_REQUIRE_HOST') == '1':
+                self.fail('real C/C++ compilers required for outliner integration')
+            self.skipTest('native C/C++ compilers unavailable for real outliner integration')
+        self.outliner = ROOT / 'scripts' / 'outline_elf_strings.py'
+        self.prepare(allow_stub=False)
+        # These single-threaded stubs exercise wrapper integration and heap
+        # lifetime; actual GLib and concurrency have their own runtime tests.
+        support = self.tools / 'heap support.c'
+        support.write_text(
+            '#include <stdlib.h>\n#include <string.h>\n'
+            'typedef unsigned long gsize;\n'
+            'void *g_malloc(gsize n) { return malloc((size_t)n); }\n'
+            'int g_once_init_enter(volatile gsize *location) { return *location == 0; }\n'
+            'void g_once_init_leave(volatile gsize *location, gsize value) { *location = value; }\n'
+            'int nianchu_wire_matches(const char *value) { return strcmp(value,"frida:rpc") == 0; }\n'
+            'int nianchu_task_matches(const char *value) { return strcmp(value,"Frida.Agent.load") == 0; }\n',
+            encoding='utf-8')
+        support_object = self.tools / 'heap support.o'
+        compiled = subprocess.run([compilers['c'], '-std=gnu99', '-O2', '-Wall', '-Wextra', '-Werror',
+                                   '-c', str(support), '-o', str(support_object)],
+                                  cwd=self.tools, capture_output=True, text=True, timeout=60)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        declarations = ('typedef unsigned long gsize;\n'
+                        'void *g_malloc(gsize);\n'
+                        'int g_once_init_enter(volatile gsize *);\n'
+                        'void g_once_init_leave(volatile gsize *, gsize);\n'
+                        'int nianchu_wire_matches(const char *);\n'
+                        'int nianchu_task_matches(const char *);\n')
+        body = ('const char *wire="frida:rpc";\n'
+                'const char *task_name(void) { return "Frida.Agent.load"; }\n'
+                'int main(void) {\n'
+                '  forced_header_type forced={4}; original_header_type number=BASE;\n'
+                '  return !nianchu_wire_matches(wire) || !nianchu_task_matches(task_name())\n'
+                '      || forced.value != 4 || number != 3;\n'
+                '}\n')
+        for language, compiler in compilers.items():
+            with self.subTest(language=language):
+                suffix = '.c' if language == 'c' else '.cpp'
+                source = self.core / ('actual outliner' + suffix)
+                prototype = declarations if language == 'c' else 'extern "C" {\n' + declarations + '}\n'
+                source.write_text('#include "original header.h"\n' + prototype + body, encoding='utf-8')
+                source.chmod(stat.S_IREAD)
+                original = source.read_bytes()
+                output = self.output.with_name('actual outliner' + suffix + '.o')
+                depfile = output.with_suffix('.d')
+                flags = ['-std=' + ('gnu99' if language == 'c' else 'gnu++17'), '-O2', '-Wall', '-Wextra',
+                         '-Werror', '-D', 'BASE=3', '-include', str(self.forced), '-I', str(self.core),
+                         '-MMD', '-MQ', str(output), '-MF', str(depfile), '-c', str(source), '-o', str(output)]
+                report = self.assert_success(self.run_wrapper(flags, language=language, compiler=[compiler]))
+                self.assertTrue(report['outliner_report']['ok'])
+                self.assertNotIn('stub', report['outliner_report'])
+                self.assertGreaterEqual(report['outliner_report']['summary']['literal_occurrences_transformed'], 2)
+                self.assertEqual(report['outliner'], str(self.outliner))
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(report['source_mode_before'], report['source_mode_after'])
+                self.assertFalse(report['temporary_files_retained'])
+                self.assertFalse(list((self.state / 'work').iterdir()))
+                object_bytes = output.read_bytes()
+                for plaintext in (b'frida:rpc', b'Frida.Agent.load'):
+                    self.assertNotIn(plaintext, object_bytes)
+                dependencies = depfile.read_bytes()
+                for required in (b'original\\ header.h', b'forced\\ header.h'):
+                    self.assertIn(required, dependencies)
+                self.assertNotIn(b'preprocessed', dependencies)
+                self.assertNotIn(b'outlined', dependencies)
+                self.assertEqual(report['depfile_sha256'], hashlib.sha256(dependencies).hexdigest())
+                executable = self.tools / ('actual-' + language + ('.exe' if os.name == 'nt' else ''))
+                linked = subprocess.run([compiler, str(output), str(support_object), '-o', str(executable)],
+                                        cwd=self.tools, capture_output=True, text=True, timeout=60)
+                self.assertEqual(linked.returncode, 0, linked.stdout + linked.stderr)
+                runtime_environment = {**os.environ,
+                                       'PATH': str(Path(compiler).resolve().parent) + os.pathsep + os.environ.get('PATH', '')}
+                restored = subprocess.run([str(executable)], cwd=self.tools, env=runtime_environment,
+                                          capture_output=True, timeout=30)
+                self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_cpp_preserves_origins_and_forwards_only_explicit_header_roots(self):
+        toolchain = self.base / 'installed ndk' / 'toolchains' / 'llvm' / 'prebuilt' / 'host'
+        binary = toolchain / 'bin' / 'clang'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('compiler identity fixture', encoding='utf-8')
+        libcxx = toolchain / 'sysroot' / 'usr' / 'include' / 'c++' / 'v1'
+        libcxx.mkdir(parents=True)
+        sdk = self.base / 'sdk headers' / 'include'
+        v8 = sdk / 'v8-10.0'
+        hwy = sdk / 'hwy'
+        glib = sdk / 'glib-2.0'
+        for path in (v8, hwy, glib):
+            path.mkdir(parents=True)
+        source = self.core / 'origin source.cpp'
+        source.write_text('const char *message="frida-outline-me";\n', encoding='utf-8')
+        output = self.output.with_name('origin.cpp.o')
+        unit = wrapper.CompileInput(0, source, output, 'cpp', [], [])
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        argv = [str(binary), '-I', str(v8), '-isystem', str(glib), '-I' + str(sdk),
+                '-I', str(self.core), '-c', str(source), '-o', str(output)]
+        roots = wrapper.cpp_header_origin_roots(argv, unit, config, self.build)
+        self.assertEqual(set(roots), {str(path.resolve()) for path in (libcxx, v8, hwy)})
+        self.assertNotIn(str(glib.resolve()), roots)
+        self.assertNotIn(str(self.core.resolve()), roots)
+        self.assertEqual(wrapper.cpp_header_origin_roots(argv,
+            wrapper.CompileInput(0, self.input, self.output, 'c', [], []), config, self.build), [])
+        result = self.run_wrapper(['-std=gnu++17', '-I', str(v8), '-isystem', str(glib),
+            '-I' + str(sdk), '-c', str(source), '-o', str(output)], language='cpp')
+        report = self.assert_success(result)
+        self.assertEqual(report['cpp_header_policy'], wrapper.CPP_HEADER_POLICY)
+        self.assertTrue(report['compiler_line_origins_preserved'])
+        self.assertNotIn('-P', report['preprocess_expanded_argv'])
+        self.assertEqual(set(report['cpp_opaque_roots']), {str(path.resolve()) for path in (v8, hwy)})
+        outline = report['outline_command']
+        forwarded = [outline[index + 1] for index, value in enumerate(outline) if value == '--cpp-opaque-root']
+        self.assertEqual(forwarded, report['cpp_opaque_roots'])
+
+    def test_cpp_header_root_cannot_hide_owned_source(self):
+        source = self.core / 'origin.cpp'
+        source.write_text('int value;\n', encoding='utf-8')
+        unit = wrapper.CompileInput(0, source, self.output, 'cpp', [], [])
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        owned = self.core / 'v8-10.0'
+        nested = self.source / 'subprojects/frida-gum/subprojects/dep/include/v8-15.0'
+        for root in (owned, nested):
+            with self.subTest(root=root):
+                root.mkdir(parents=True)
+                with self.assertRaisesRegex(wrapper.OutlineBuildError, 'overlaps owned'):
+                    wrapper.cpp_header_origin_roots(['compiler', '-I', str(root)], unit, config, self.build)
+        ancestor = self.base / 'ancestor roots' / 'v8-10.0'
+        (ancestor / 'subprojects/frida-core').mkdir(parents=True)
+        with self.assertRaisesRegex(wrapper.OutlineBuildError, 'overlaps owned'):
+            wrapper.cpp_header_origin_roots(['compiler', '-I', str(ancestor)], unit,
+                dict(config, source_root=str(ancestor)), self.build)
+
+    def test_cpp_header_roots_resolve_path_compiler_and_explicit_sysroot(self):
+        source = self.core / 'origin.cpp'
+        source.write_text('int value;\n', encoding='utf-8')
+        unit = wrapper.CompileInput(0, source, self.output, 'cpp', [], [])
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        toolchain = self.base / 'known ndk host'
+        binary = toolchain / 'bin' / 'clang++'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('compiler identity fixture', encoding='utf-8')
+        libcxx = toolchain / 'sysroot/usr/include/c++/v1'
+        libcxx.mkdir(parents=True)
+        from unittest import mock
+        with mock.patch.object(wrapper.shutil, 'which', return_value=str(binary)) as lookup:
+            roots = wrapper.cpp_header_origin_roots(['clang++', '-c', str(source)], unit, config, self.build)
+        lookup.assert_called_once_with('clang++')
+        self.assertEqual(roots, [str(libcxx.resolve())])
+        self.assertEqual(wrapper.cpp_header_origin_roots([
+            str(binary), '--sysroot=' + str(toolchain / 'sysroot'), '-c', str(source)], unit, config, self.build), roots)
+
+    def test_cpp_wrapped_line_marker_suppression_rejected(self):
+        source = self.core / 'origin.cpp'
+        source.write_text('int value;\n', encoding='utf-8')
+        variants = (['-Wp,-P'], ['-Wp,-MD,ignored.d,-P'], ['-Xpreprocessor', '-P'],
+                    ['-Xclang', '-P'], ['-Xclang=-P'])
+        for index, wrapped in enumerate(variants):
+            with self.subTest(wrapped=wrapped):
+                output = self.output.with_name('origin-' + str(index) + '.o')
+                result = self.run_wrapper([*wrapped, '-c', str(source), '-o', str(output)], language='cpp')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('wrapped -P is unsupported', result.stderr)
+        self.assertFalse(any('-E' in call['expanded'] for call in self.calls()))
 
     def test_real_android_arm64_and_compat_arm32_c_cpp_object_compilation(self):
         clang = os.environ.get('NIANCHU_TEST_CLANG') or shutil.which('clang')

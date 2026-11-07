@@ -267,6 +267,8 @@ def readable_load_audit(data):
 
 def require_readable_load_budget(data, kind):
     result = readable_load_audit(data)
+    if kind in ('agent', 'gadget') and result['total_printable_string_callbacks'] == 0:
+        raise ValueError(kind + ' readable PT_LOAD scan produced no printable callbacks')
     if kind in ('agent', 'gadget') and not result['below_threshold']:
         first = result['matches'][0]
         raise ValueError(kind + ' readable PT_LOAD signature budget exceeded: ' +

@@ -33,7 +33,8 @@ import subprocess
 import tempfile
 
 SCHEMA = 1
-WRAPPER_VERSION = '1.0'
+WRAPPER_VERSION = '1.1'
+CPP_HEADER_POLICY = 'explicit-cpp-header-origins-v1'
 PARSER_PINS = {'tree-sitter': '0.25.2', 'tree-sitter-c': '0.24.2', 'tree-sitter-cpp': '0.23.4'}
 PINNED_RELENG = {
     '16.7.19': {'commit': 'ddd0f5875c08edc005e9f89f7fdb7b0928fac4dc',
@@ -209,6 +210,7 @@ def prepare(source, version, state_dir, python, outliner, env_output=None,
               'outliner': str(outliner), 'work_root': str(state_dir / 'work'),
               'report_dir': str(state_dir / 'reports'), 'identity_cache': str(state_dir / 'compiler-identities'),
               'response_format': response_format, 'dependencies': dependencies,
+              'cpp_header_policy': CPP_HEADER_POLICY,
               'parser_pins': PARSER_PINS, 'wrapper_sha256': digest(wrapper_data),
               'outliner_sha256': digest(outliner.read_bytes())}
     changed |= owned_write(config_path, json_bytes(config))
@@ -258,6 +260,8 @@ def validate_build(state_dir, build):
     config = json.loads(config_path.read_text(encoding='utf-8'))
     if config.get('schema') != SCHEMA or config.get('wrapper_version') != WRAPPER_VERSION:
         raise InstallationError('unsupported installed configuration')
+    if config.get('cpp_header_policy') != CPP_HEADER_POLICY:
+        raise InstallationError('unsupported installed C++ header origin policy')
     wrapper = Path(config['wrapper'])
     if digest(wrapper.read_bytes()) != config['wrapper_sha256']:
         raise InstallationError('installed wrapper hash differs from configuration')

@@ -9,10 +9,13 @@ GNU C/C++ constructor, typeof, and trap support.  No includes/macros are emitted
 """
 
 import argparse
+from bisect import bisect_right
+from collections import namedtuple
 import copy
 import hashlib
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -37,6 +40,715 @@ class OutlineError(ValueError):
 
 class Unsupported(ValueError):
     pass
+
+
+# These spellings are compiler keywords, not arbitrary identifiers/macros.  The
+# shadow is only for the pinned parsers: no normalization is an output edit.
+_KEYWORD_ALIASES = {b'__signed': b'signed', b'__signed__': b'signed'}
+_NULLABILITY = {b'_Nullable', b'_Nonnull', b'_Null_unspecified', b'_Nullable_result'}
+_TYPEOF = {b'typeof', b'__typeof', b'__typeof__'}
+# Audit the attribute *envelope* and its arguments as well as its name.  Unknown
+# attributes are left to the real grammar (and remain unsafe for slot/type use).
+_GNU_ATTRIBUTES = frozenset('''
+    alias aligned alloc_align alloc_size always_inline annotate artificial
+    availability cleanup cold const constructor deprecated destructor diagnose_as_builtin
+    diagnose_if enum_extensibility error externally_visible fallthrough flatten
+    format format_arg gnu_inline hot leaf malloc may_alias minsize mode no_sanitize
+    no_sanitize_address no_sanitize_thread no_sanitize_undefined no_stack_protector
+    nodebug noinline nonnull noreturn nothrow optimize overloadable packed
+    pass_dynamic_object_size pass_object_size pure returns_nonnull section sentinel
+    swift_name target tls_model transparent_union type_visibility unavailable unused used
+    vector_size visibility warn_unused_result warning weak weak_import weakref
+'''.split())
+_ATTRIBUTE_NODE_TYPES = {'attribute_specifier', 'attribute_declaration', 'ms_declspec_modifier'}
+_Token = namedtuple('_Token', 'kind start end value')
+_TOKEN_RE = re.compile(rb'''(?P<space>\s+)|(?P<comment>/\*[\s\S]*?\*/|//(?:\\\r?\n|[^\r\n])*)
+    |(?P<raw>(?:u8|[uUL])?R")
+    |(?P<string>(?:u8|[uUL])?"(?:\\[\s\S]|[^"\\\r\n])*")
+    |(?P<char>(?:u8|[uUL])?'(?:\\[\s\S]|[^'\\\r\n])*')
+    |(?P<identifier>[A-Za-z_$\x80-\xff][A-Za-z_0-9$\x80-\xff]*)
+    |(?P<number>[0-9][A-Za-z_0-9.']*)|(?P<punct>[\s\S])''', re.X)
+
+
+def _lex(source):
+    """Significant preprocessing tokens; never scan keywords inside literals."""
+    tokens = []
+    i = 0
+    while i < len(source):
+        match = _TOKEN_RE.match(source, i)
+        kind, end = match.lastgroup, match.end()
+        if kind == 'raw':
+            opening = source.find(b'(', end, end + 17)
+            delimiter = source[end:opening] if opening != -1 else b''
+            if (opening == -1 or any(c in b' ()\\\t\r\n\v\f' for c in delimiter)):
+                kind, end = 'invalid', len(source)
+            else:
+                closing = source.find(b')' + delimiter + b'"', opening + 1)
+                kind, end = ('invalid', len(source)) if closing == -1 else ('string', closing + len(delimiter) + 2)
+        elif kind == 'punct' and source[i:i + 1] == b'#':
+            line = source.rfind(b'\n', 0, i) + 1
+            if not source[line:i].strip():
+                # Leave directives intact for validate_input(), but do not
+                # normalize filenames, #defines, or pragmas as compiler tokens.
+                end = source.find(b'\n', end)
+                end = len(source) if end == -1 else end + 1
+                while source[i:end].rstrip(b'\r\n').endswith(b'\\') and end < len(source):
+                    following = source.find(b'\n', end)
+                    end = len(source) if following == -1 else following + 1
+                kind = 'directive'
+        elif kind == 'punct' and source[i:i + 1] in {b'"', b"'"}:
+            kind = 'invalid'
+        if kind not in {'space', 'comment', 'directive'}:
+            tokens.append(_Token(kind, i, end, source[i:end]))
+        i = end
+    return tokens
+
+
+def _balanced_tokens(tokens):
+    pairs, stack = {}, []
+    closing = {b')': b'(', b']': b'[', b'}': b'{'}
+    for i, token in enumerate(tokens):
+        if token.kind != 'punct':
+            continue
+        if token.value in {b'(', b'[', b'{'}:
+            stack.append(i)
+        elif token.value in closing:
+            if stack and tokens[stack[-1]].value == closing[token.value]:
+                start = stack.pop()
+                pairs[start] = i
+            else:
+                stack.clear()
+    return pairs
+
+
+def _padded(original, replacement=b''):
+    """Keep byte count and every CR/LF, including multiline extension operands."""
+    result = bytearray(c if c in (10, 13) else 32 for c in original)
+    if replacement:
+        if len(replacement) > len(result) or any(c in (10, 13) for c in original[:len(replacement)]):
+            raise Unsupported('parser_shadow_token_does_not_fit')
+        result[:len(replacement)] = replacement
+    return bytes(result)
+
+
+_LINE_MARKER = re.compile(rb'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+("(?:\\[^\r\n]|[^"\\\r\n])*")((?:[ \t]+[0-9]+)*)[ \t]*(?:\r?\n|$)')
+_SYNTHETIC_ORIGIN = b'#line 1 "<nianchu-outline-generated>"\n'
+
+
+def _origin_path(raw):
+    try:
+        name = _decode_ordinary(raw).decode('utf-8')
+    except (Unsupported, UnicodeError):
+        return None
+    if name.startswith('<') and name.endswith('>'):
+        return None
+    path = Path(name)
+    if not path.is_absolute():
+        return None
+    return os.path.normcase(str(path.resolve())).replace('\\', '/')
+
+
+def _brace_kind(tokens):
+    """Classify only the lexical shells needed at an origin boundary.
+
+    Parenthesis operands stay in the token list, but a function parameter list
+    must follow a declarator name rather than an attribute/type operator.
+    Aggregate definitions still require their trailing declaration semicolon.
+    """
+    pairs = _balanced_tokens(tokens)
+    top = []
+    function_parameters = False
+    i = 0
+    nonfunctions = {
+        b'__attribute__', b'__attribute', b'__declspec', b'alignas',
+        b'_Alignas', b'noexcept', b'decltype', b'typeof', b'__typeof',
+        b'__typeof__', b'__underlying_type', b'requires', b'if', b'while',
+        b'switch', b'for', b'catch', b'sizeof', b'alignof', b'void',
+        b'char', b'int', b'long', b'short', b'float', b'double', b'bool'}
+    while i < len(tokens):
+        token = tokens[i]
+        top.append(token)
+        if token.value in {b'(', b'['} and i in pairs:
+            if (token.value == b'(' and i > 0
+                    and tokens[i - 1].kind == 'identifier'
+                    and tokens[i - 1].value not in nonfunctions):
+                function_parameters = True
+            i = pairs[i] + 1
+        else:
+            i += 1
+    values = [token.value for token in top]
+    if b'namespace' in values and b'=' not in values:
+        return 'namespace'
+    if (b'extern' in values and any(token.kind == 'string'
+            and token.value in {b'"C"', b'"C++"'} for token in top)
+            and not function_parameters):
+        return 'linkage'
+    if function_parameters and b'=' not in values:
+        return 'function'
+    if any(value in {b'struct', b'class', b'union', b'enum'} for value in values):
+        return 'aggregate'
+    return 'other'
+
+
+class _HeaderOrigins:
+    """An explicit, C++-only parser boundary, never an emitter passthrough.
+
+    Only a complete balanced run of tokens from the selected physical header
+    roots is hidden.  A delimiter crossing any owned/header boundary is fatal,
+    even if a later compiler would accept it.  C/GLib/owned headers stay parsed.
+    """
+    def __init__(self, source, roots):
+        self.source = source
+        self.roots = []
+        self.ranges = []
+        self.blocks = []
+        self.symbols = set()
+        for root in roots:
+            path = Path(root)
+            if not path.is_absolute() or not path.is_dir():
+                raise Unsupported('cpp_opaque_root_not_physical_directory')
+            value = os.path.normcase(str(path.resolve())).replace('\\', '/').rstrip('/')
+            # Do not accept an input itself, a drive, or all of usr/include as
+            # a convenient boundary.  The caller must name an external subtree.
+            if len(value.split('/')) < 4:
+                raise Unsupported('cpp_opaque_root_too_broad')
+            if value not in self.roots:
+                self.roots.append(value)
+        if not self.roots:
+            self.view = source
+            return
+        markers = list(_LINE_MARKER.finditer(source))
+        if not markers:
+            raise Unsupported('cpp_opaque_requires_line_markers')
+        origin = None
+        cursor = 0
+        for marker in markers:
+            self.add_block(cursor, marker.start(), origin)
+            origin = _origin_path(marker.group(2))
+            cursor = marker.end()
+        self.add_block(cursor, len(source), origin)
+        shadow = bytearray(source)
+        opening = {b'(': b')', b'[': b']', b'{': b'}'}
+        closing = {v: k for k, v in opening.items()}
+        stack = []
+        frames = []
+        pending = []
+        opaque_base = None
+        run_start = None
+        run_end = None
+        run_origins = set()
+        last_mode = None
+        for block in self.blocks:
+            tokens = _lex(source[block['start']:block['end']])
+            if not tokens:
+                continue
+            mode = block['opaque']
+            transition = last_mode is not None and mode != last_mode
+            if transition:
+                if last_mode and tuple(stack) != opaque_base:
+                    raise Unsupported('cpp_opaque_cross_origin_delimiter')
+                if pending:
+                    raise Unsupported('cpp_opaque_cross_origin_declaration')
+                if last_mode:
+                    self.ranges.append({'start': run_start, 'end': run_end,
+                                        'origins': sorted(run_origins), 'kind': 'header-origin', 'names': ()})
+                    run_start, run_end, run_origins = None, None, set()
+                    opaque_base = None
+            if mode:
+                if run_start is None:
+                    if pending:
+                        raise Unsupported('cpp_opaque_cross_origin_declaration')
+                    if any(frame['kind'] not in {'namespace', 'linkage'} for frame in frames):
+                        raise Unsupported('cpp_opaque_unsupported_owned_scope')
+                    opaque_base = tuple(stack)
+                    run_start = block['start']
+                run_end = block['end']
+                run_origins.add(block['origin'])
+                # Directives must remain visible to validate_input, so unknown
+                # pragmas/#defines cannot be smuggled through the boundary.
+                for line in re.finditer(rb'(?m)^[ \t]*#[^\r\n]*(?:\r?\n|$)', source[block['start']:block['end']]):
+                    begin = block['start'] + line.start()
+                    end = block['start'] + line.end()
+                    shadow[begin:end] = source[begin:end]
+                cursor = block['start']
+                for directive in re.finditer(rb'(?m)^[ \t]*#[^\r\n]*(?:\r?\n|$)', source[block['start']:block['end']]):
+                    begin = block['start'] + directive.start()
+                    shadow[cursor:begin] = _padded(source[cursor:begin])
+                    cursor = block['start'] + directive.end()
+                shadow[cursor:block['end']] = _padded(source[cursor:block['end']])
+                self.symbols.update(t.value for t in tokens if t.kind == 'identifier')
+            for token in tokens:
+                if token.kind == 'punct' and token.value in opening:
+                    if token.value == b'{':
+                        kind = _brace_kind(pending)
+                        frames.append({'kind': kind, 'prefix': pending, 'opening': token})
+                        pending = []
+                    else:
+                        frames.append({'kind': 'operand', 'prefix': pending, 'opening': token})
+                        pending = []
+                    stack.append(token.value)
+                elif token.kind == 'punct' and token.value in closing:
+                    if mode and len(stack) <= len(opaque_base):
+                        raise Unsupported('cpp_opaque_cross_origin_delimiter')
+                    if not stack or stack.pop() != closing[token.value]:
+                        raise Unsupported('cpp_opaque_unbalanced_delimiter')
+                    frame = frames.pop()
+                    if token.value == b'}' and frame['kind'] in {'namespace', 'linkage', 'function'}:
+                        pending = []
+                    elif frame['kind'] == 'operand':
+                        pending = frame['prefix'] + [frame['opening']] + pending + [token]
+                    else:
+                        pending = frame['prefix'] + [token]
+                elif token.kind == 'punct' and token.value == b';':
+                    pending = []
+                else:
+                    pending.append(token)
+            last_mode = mode
+        if last_mode:
+            if tuple(stack) != opaque_base:
+                raise Unsupported('cpp_opaque_unbalanced_delimiter')
+            if pending:
+                raise Unsupported('cpp_opaque_cross_origin_declaration')
+            self.ranges.append({'start': run_start, 'end': run_end,
+                                'origins': sorted(run_origins), 'kind': 'header-origin', 'names': ()})
+        self.view = bytes(shadow)
+
+    def add_block(self, start, end, origin):
+        if start >= end:
+            return
+        opaque = origin is not None and any(origin == root or origin.startswith(root + '/') for root in self.roots)
+        self.blocks.append({'start': start, 'end': end, 'origin': origin, 'opaque': opaque})
+
+    def summary(self):
+        return {'roots': self.roots, 'balanced_regions': len(self.ranges),
+                'opaque_bytes': sum(b['end'] - b['start'] for b in self.blocks if b['opaque']),
+                'original_bytes_emitted': True}
+
+
+class _ParserShadow:
+    """Audited, offset-identical parser input plus all hidden safety contexts.
+
+    GNU typeof's operand is separately parsed as sizeof(type-or-expression),
+    then represented by an *unknown* type, never inferred to be int in safety
+    analysis.  Attribute arguments are separately parsed in a supported grammar
+    position.  An invalid/unrecognized extension cannot hide arbitrary errors.
+    """
+    def __init__(self, source, language, parser, cpp_opaque_roots=()):
+        self.source, self.language, self.parser = source, language, parser
+        self.origins = _HeaderOrigins(source, cpp_opaque_roots)
+        self.tokens = _lex(self.origins.view)
+        self.pairs = _balanced_tokens(self.tokens)
+        self.regions = list(self.origins.ranges)
+        shadow = bytearray(self.origins.view)
+        # The pinned grammar misinterprets legal #line between enumerators as
+        # a missing comma.  Audited line directives are parser trivia only;
+        # their original bytes and physical origin remain in compiler output.
+        if cpp_opaque_roots:
+            for marker in _LINE_MARKER.finditer(source):
+                self.replace(shadow, marker.start(), marker.end(), 'line-marker')
+        typeops = []
+        for i, token in enumerate(self.tokens):
+            if token.kind != 'identifier':
+                continue
+            if token.value in _KEYWORD_ALIASES:
+                self.replace(shadow, token.start, token.end, 'keyword-alias', _KEYWORD_ALIASES[token.value])
+            elif token.value in _NULLABILITY:
+                self.replace(shadow, token.start, token.end, 'nullability')
+            elif token.value in {b'__attribute__', b'__attribute'}:
+                parsed = self.attribute(i)
+                if parsed is not None:
+                    end, names = parsed
+                    raw = source[token.start:self.tokens[end].end]
+                    probe = b'int ' + raw + b' _nso_attribute_probe;\n'
+                    if not parser.parse(probe).root_node.has_error:
+                        self.replace(shadow, token.start, self.tokens[end].end, 'attribute', names=names)
+            elif token.value in _TYPEOF and i + 1 < len(self.tokens) and self.tokens[i + 1].value == b'(':
+                end = self.pairs.get(i + 1)
+                if end is not None and end > i + 2:
+                    typeops.append((i, end))
+            elif language == 'cpp' and token.value == b'__underlying_type' and i + 1 < len(self.tokens) and self.tokens[i + 1].value == b'(':
+                end = self.pairs.get(i + 1)
+                if end is not None and end > i + 2:
+                    typeops.append((i, end))
+        # Inner operands first, so a nested GNU typeof is itself syntax-checked.
+        probes = {}
+        for i, end in sorted(typeops, key=lambda pair: self.tokens[pair[1]].end - self.tokens[pair[0]].start):
+            token = self.tokens[i]
+            operand = bytes(shadow[self.tokens[i + 1].start:self.tokens[end].end])
+            if operand not in probes:
+                probe = b'void _nso_type_probe(void) { (void) sizeof ' + operand + b'; }\n'
+                probes[operand] = not parser.parse(probe).root_node.has_error
+            if probes[operand]:
+                self.replace(shadow, token.start, self.tokens[end].end, 'typeof', b'int')
+        # GNU builtins have explicit type operands, which these grammars treat
+        # as expression arguments.  Validate only those operands as types; keep
+        # every value argument, comma and call boundary in the shadow AST.
+        for i, token in enumerate(self.tokens):
+            type_indices = {b'__builtin_va_arg': {1}, b'__builtin_types_compatible_p': {0, 1},
+                            b'__builtin_offsetof': {0}}.get(token.value) if token.kind == 'identifier' else None
+            if type_indices is None or i + 1 >= len(self.tokens) or self.tokens[i + 1].value != b'(':
+                continue
+            end = self.pairs.get(i + 1)
+            if end is None:
+                continue
+            arguments, start, cursor = [], i + 2, i + 2
+            while cursor < end:
+                if self.tokens[cursor].value == b',':
+                    arguments.append((start, cursor))
+                    start = cursor + 1
+                cursor = self.pairs.get(cursor, cursor) + 1
+            arguments.append((start, end))
+            if len(arguments) != 2 or any(begin == finish for begin, finish in arguments):
+                continue
+            for index in type_indices:
+                begin, finish = arguments[index]
+                start, stop = self.tokens[begin].start, self.tokens[finish - 1].end
+                operand = bytes(shadow[start:stop])
+                probe = b'void _nso_builtin_type_probe(void) { (void) sizeof(' + operand + b'); }\n'
+                if not parser.parse(probe).root_node.has_error:
+                    self.replace(shadow, start, stop, 'builtin-type', b'0')
+        self.view = bytes(shadow)
+        if language == 'cpp':
+            self.cpp_declarators(shadow)
+            self.view = bytes(shadow)
+        preliminary = parser.parse(self.view)
+        # Only declarator labels, confirmed by an AST declaration context.  A
+        # basic/extended asm *statement* must retain its instruction operands.
+        for node in _walk(preliminary.root_node):
+            if node.type != 'gnu_asm_expression':
+                continue
+            if not any(p.type in {'declaration', 'type_definition', 'field_declaration'} for p in _parents(node)):
+                continue
+            start = next((i for i, t in enumerate(self.tokens) if t.start == node.start_byte), None)
+            if start is None or self.tokens[start].value not in {b'asm', b'__asm', b'__asm__'}:
+                continue
+            opening = start + 1
+            end = self.pairs.get(opening)
+            if (opening >= len(self.tokens) or self.tokens[opening].value != b'(' or end is None
+                    or end <= opening + 1 or any(t.kind != 'string' for t in self.tokens[opening + 1:end])):
+                continue
+            self.replace(shadow, node.start_byte, self.tokens[end].end, 'asm-declarator')
+        self.view = bytes(shadow)
+        self.tree = parser.parse(self.view)
+        self.attachments = {}
+        self.type_contexts = {}
+        self.bind_regions()
+        self.bind_cpp_regions()
+        self.starts = [t.start for t in self.tokens]
+
+    def cpp_declarators(self, shadow):
+        tokens = self.tokens
+        tree = self.parser.parse(bytes(shadow))
+        starts = {t.start: i for i, t in enumerate(tokens)}
+        for node in _walk(tree.root_node):
+            if node.type != 'init_declarator':
+                continue
+            value = node.child_by_field_name('value')
+            declarator = node.child_by_field_name('declarator')
+            function = next((n for n in _walk(declarator) if n.type == 'function_declarator'), None) if declarator is not None else None
+            function_name = function.child_by_field_name('declarator') if function is not None else None
+            if (value is None or function is None or value.type != 'delete_expression'
+                    or (function_name is not None and any(n.type == 'pointer_declarator' for n in _walk(function_name)))):
+                continue
+            index = starts.get(value.start_byte)
+            if (index is None or index == 0 or index + 1 >= len(tokens)
+                    or tokens[index].value != b'delete' or tokens[index - 1].value != b'='
+                    or tokens[index + 1].value != b';'):
+                continue
+            self.replace(shadow, tokens[index - 1].start, tokens[index].end, 'deleted-function')
+        # The grammar does not accept abstract pointer-to-member declarators
+        # in template type arguments.  Project only a lexically complete C::
+        # scope before *, retaining the pointer, parameters, cv/ref/noexcept,
+        # and every surrounding type token.  Mark the full type unknown later.
+        tree = self.parser.parse(bytes(shadow))
+        regions = []
+        template_ranges = []
+        for opening, token in enumerate(tokens):
+            if token.value != b'<' or opening == 0 or tokens[opening - 1].kind != 'identifier':
+                continue
+            if opening < 2 or tokens[opening - 2].value not in {b'struct', b'class', b'union'}:
+                continue
+            depth, cursor = 1, opening + 1
+            while cursor < len(tokens) and depth:
+                if tokens[cursor].value in {b'(', b'[', b'{'}:
+                    closing = self.pairs.get(cursor)
+                    if closing is None:
+                        break
+                    cursor = closing + 1
+                    continue
+                if tokens[cursor].value == b'<':
+                    depth += 1
+                elif tokens[cursor].value == b'>':
+                    depth -= 1
+                elif tokens[cursor].value == b';':
+                    break
+                cursor += 1
+            if depth == 0:
+                template_ranges.append((tokens[opening].start, tokens[cursor - 1].end))
+        for i in range(3, len(tokens)):
+            if tokens[i].value != b'*' or [t.value for t in tokens[i - 2:i]] != [b':', b':']:
+                continue
+            name = i - 3
+            if tokens[name].kind != 'identifier':
+                continue
+            begin = name
+            while begin >= 3 and [t.value for t in tokens[begin - 2:begin]] == [b':', b':'] and tokens[begin - 3].kind == 'identifier':
+                begin -= 3
+            start, end = tokens[begin].start, tokens[i - 1].end
+            # Do not turn the value expression &C::member / C::*anything into
+            # a type.  A surrounding recognized type context is required.
+            node = tree.root_node.descendant_for_byte_range(tokens[i].start, tokens[i].end)
+            owner = next((n for n in (node, *_parents(node))
+                          if n.type in {'template_argument_list', 'type_descriptor', 'type_definition',
+                                        'alias_declaration', 'parameter_declaration', 'field_declaration',
+                                        'declaration'}), None)
+            anchored = next(((a, b) for a, b in template_ranges if a < start and tokens[i].end < b), None)
+            if anchored is not None:
+                owner_start, owner_end = anchored
+                projected = bytes(shadow[owner_start:owner_end])
+                relative = start - owner_start
+                projected = projected[:relative] + _padded(self.source[start:end]) + projected[relative + end - start:]
+                prefix = b'using _nso_member_probe = _nso_template'
+                if self.member_type_probe(prefix + projected + b';\n', len(prefix) + tokens[i].start - owner_start, True):
+                    regions.append((start, end))
+                continue
+            if owner is None:
+                continue
+            projected = bytes(shadow[owner.start_byte:owner.end_byte])
+            relative = start - owner.start_byte
+            if relative < 0:
+                continue
+            projected = projected[:relative] + _padded(self.source[start:end]) + projected[relative + end - start:]
+            prefix, require_type = b'', False
+            if owner.type == 'template_argument_list':
+                prefix = b'using _nso_member_probe = _nso_template'
+                probe, require_type = prefix + projected + b';\n', True
+            elif owner.type == 'type_descriptor':
+                prefix = b'using _nso_member_probe = '
+                probe, require_type = prefix + projected + b';\n', True
+            else:
+                probe = projected if projected.rstrip().endswith(b';') else projected + b';'
+                # Member/parameter fragments can be validated as a field or
+                # function parameter without discarding any of their syntax.
+                if owner.type == 'parameter_declaration':
+                    prefix = b'void _nso_member_probe('
+                    probe = prefix + projected + b');\n'
+                elif owner.type == 'field_declaration':
+                    prefix = b'struct _nso_member_probe { '
+                    probe = prefix + probe + b' };\n'
+            if self.member_type_probe(probe, len(prefix) + tokens[i].start - owner.start_byte, require_type):
+                regions.append((start, end))
+        for start, end in regions:
+            self.replace(shadow, start, end, 'member-pointer')
+        # This grammar accepts operator declarations but not explicit member
+        # calls such as receiver.operator&().  Change just that operator-id to a
+        # same-length identifier; receiver and every value argument stay parsed.
+        tree = self.parser.parse(bytes(shadow))
+        for node in _walk(tree.root_node):
+            if node.type != 'operator_name' or node.parent is None or node.parent.type != 'ERROR':
+                continue
+            index = starts.get(node.start_byte)
+            if index is None or index == 0:
+                continue
+            before = tokens[index - 1].value
+            if before != b'.' and not (before == b'>' and index >= 2 and tokens[index - 2].value == b'-'):
+                continue
+            end = index + 1
+            while end < len(tokens) and tokens[end].end <= node.end_byte:
+                end += 1
+            if end >= len(tokens) or tokens[end].value != b'(' or end not in self.pairs:
+                continue
+            raw = self.source[node.start_byte:node.end_byte]
+            if not re.fullmatch(rb'operator\s*(?:\[\s*\]|\(\s*\)|->\*?|<<=?|>>=?|[+*/%^&|=!<>-]=?|\+\+|--|&&|\|\||~|(?:new|delete)\s*(?:\[\s*\])?)', raw):
+                continue
+            probe = b'void _nso_operator_probe(){ receiver.' + raw + b'(); }\n'
+            projected = probe.replace(raw, b'_nso_op')
+            if not self.parser.parse(projected).root_node.has_error:
+                self.replace(shadow, node.start_byte, node.end_byte, 'operator-id', b'_nso_op')
+
+        # Implicit operator calls in an unambiguous expression context can
+        # also be mistaken for declarations (g(operator*())).  Normalize only
+        # the operator-id, never its arguments or an actual operator signature.
+        tree = self.parser.parse(bytes(shadow))
+        for i, token in enumerate(tokens):
+            if token.value != b'operator' or i == 0:
+                continue
+            cursor, ending = i + 1, None
+            if cursor < len(tokens) and tokens[cursor].value in {b'(', b'['}:
+                close = self.pairs.get(cursor)
+                if close == cursor + 1:
+                    ending = close + 1
+            else:
+                while cursor < len(tokens) and tokens[cursor].value not in {b'(', b';', b'{', b'}', b','}:
+                    cursor += 1
+                ending = cursor
+            if ending is None or ending >= len(tokens) or tokens[ending].value != b'(' or ending not in self.pairs:
+                continue
+            raw = self.source[token.start:tokens[ending - 1].end]
+            if not re.fullmatch(rb'operator\s*(?:\[\s*\]|\(\s*\)|->\*?|<<=?|>>=?|[+*/%^&|=!<>-]=?|\+\+|--|&&|\|\||~|(?:new|delete)\s*(?:\[\s*\])?)', raw):
+                continue
+            node = tree.root_node.descendant_for_byte_range(token.start, token.end)
+            if not any(n.type in {'function_definition', 'lambda_expression'} for n in (node, *_parents(node))):
+                continue
+            previous = tokens[i - 1].value
+            expression = previous in {b'return', b'co_return', b'=', b',', b'?'}
+            if previous == b'(':
+                opening = i - 1
+                while opening > 0 and tokens[opening - 1].value == b'(':
+                    opening -= 1
+                head = tokens[opening - 1] if opening > 0 else None
+                # Exclude primitive/type syntax and decltype (which already
+                # parses operator identifiers), allow a normal call expression.
+                expression = head is not None and head.kind == 'identifier' and head.value not in {
+                    b'decltype', b'sizeof', b'alignof', b'int', b'char', b'void', b'long', b'short', b'float', b'double'}
+            if expression:
+                self.replace(shadow, token.start, tokens[ending - 1].end, 'operator-id', b'_nso_op')
+
+    def member_type_probe(self, source, at, require_type):
+        tree = self.parser.parse(source)
+        if tree.root_node.has_error:
+            return False
+        node = tree.root_node.descendant_for_byte_range(at, at + 1)
+        chain = (node, *_parents(node))
+        pointer = next((n for n in chain if n.type in {'abstract_pointer_declarator', 'pointer_declarator'}), None)
+        if pointer is None:
+            return False
+        # A parseable binary expression is not a validated abstract type.
+        if require_type and not any(n.type == 'type_descriptor' for n in chain):
+            return False
+        if any(n.type == 'init_declarator' and _contains(n.child_by_field_name('value'), node) for n in chain):
+            return False
+        return True
+
+    def replace(self, shadow, start, end, kind, replacement=b'', names=()):
+        shadow[start:end] = _padded(self.source[start:end], replacement)
+        self.regions.append({'start': start, 'end': end, 'kind': kind, 'names': names})
+
+    def attribute(self, start):
+        tokens, pairs = self.tokens, self.pairs
+        outer = start + 1
+        if outer + 1 >= len(tokens) or tokens[outer].value != b'(' or tokens[outer + 1].value != b'(':
+            return None
+        end = pairs.get(outer)
+        if end is None or pairs.get(outer + 1) != end - 1:
+            return None
+        i, names = outer + 2, []
+        while i < end - 1:
+            if tokens[i].kind != 'identifier':
+                return None
+            name = tokens[i].value.decode('ascii', errors='replace')
+            if name.startswith('__') and name.endswith('__'):
+                name = name[2:-2]
+            if name not in _GNU_ATTRIBUTES:
+                return None
+            names.append(name)
+            i += 1
+            if i < end - 1 and tokens[i].value == b'(':
+                argument_end = pairs.get(i)
+                if argument_end is None or argument_end >= end - 1:
+                    return None
+                if any(t.kind == 'invalid' for t in tokens[i:argument_end + 1]):
+                    return None
+                i = argument_end + 1
+            if i < end - 1:
+                if tokens[i].value != b',':
+                    return None
+                i += 1
+                if i == end - 1:
+                    return None
+        return end, tuple(names)
+
+    def bind_regions(self):
+        """A blanked prefix/postfix still belongs to the declaration/type.
+
+        Most extensions lie inside node byte ranges.  Prefix attributes and
+        attributes following an aggregate's closing brace do not, so explicitly
+        attach them to the adjacent declaration or completed aggregate as well.
+        """
+        tokens = self.tokens
+        starts = [t.start for t in tokens]
+        owners = {'declaration', 'type_definition', 'field_declaration', 'parameter_declaration',
+                  'optional_parameter_declaration', 'function_definition', 'struct_specifier',
+                  'union_specifier', 'class_specifier', 'enum_specifier'}
+        for region in self.regions:
+            if region['kind'] not in {'attribute', 'nullability', 'asm-declarator'}:
+                continue
+            index = bisect_right(starts, region['start']) - 1
+            while index >= 0 and tokens[index].end > region['start']:
+                index -= 1
+            after = bisect_right(starts, region['end'] - 1)
+            if after < len(tokens):
+                following = tokens[after]
+                node = self.tree.root_node.descendant_for_byte_range(following.start, following.end)
+                for parent in (node, *_parents(node)):
+                    if parent.type in owners and parent.start_byte >= region['end']:
+                        self.attachments.setdefault(parent.id, []).append(region)
+                        break
+            if index >= 0 and tokens[index].value == b'}':
+                previous = tokens[index]
+                node = self.tree.root_node.descendant_for_byte_range(previous.start, previous.end)
+                for parent in (node, *_parents(node)):
+                    if parent.type in {'struct_specifier', 'union_specifier', 'class_specifier', 'enum_specifier'} and parent.end_byte == previous.end:
+                        self.attachments.setdefault(parent.id, []).append(region)
+                        break
+
+    def bind_cpp_regions(self):
+        if self.language != 'cpp':
+            return
+        for region in self.regions:
+            if region['kind'] not in {'deleted-function', 'member-pointer', 'operator-id'}:
+                continue
+            at = region['end'] if region['kind'] == 'member-pointer' else region['start']
+            node = self.tree.root_node.descendant_for_byte_range(at, min(at + 1, len(self.source)))
+            chain = (node, *_parents(node))
+            if region['kind'] == 'deleted-function':
+                owner = next((n for n in chain if n.type in {'declaration', 'field_declaration', 'function_definition'}), None)
+                if owner is not None:
+                    self.attachments.setdefault(owner.id, []).append(region)
+            elif region['kind'] == 'member-pointer':
+                owner = next((n for n in chain if n.type in {'type_descriptor', 'type_definition', 'alias_declaration',
+                                                            'parameter_declaration', 'field_declaration', 'declaration'}), None)
+                if owner is not None:
+                    self.type_contexts.setdefault(owner.id, []).append(region)
+            else:
+                owner = next((n for n in chain if n.type == 'call_expression'), None)
+                if owner is not None:
+                    self.attachments.setdefault(owner.id, []).append(region)
+
+    def attached(self, node, kind):
+        return any(r['kind'] == kind for r in self.attachments.get(node.id, ()))
+
+    def within(self, node, kinds=None):
+        if node is None:
+            return []
+        return [r for r in self.regions if (kinds is None or r['kind'] in kinds)
+                and r['start'] < node.end_byte and node.start_byte < r['end']]
+
+    def attributes(self, node):
+        kinds = {'attribute', 'nullability', 'asm-declarator'}
+        return bool(self.within(node, kinds) or any(n.id in self.attachments for n in _walk(node)))
+
+    def hidden_tokens(self, region):
+        start = bisect_right(self.starts, region['start']) - 1
+        end = bisect_right(self.starts, region['end'] - 1)
+        return self.tokens[max(0, start):end]
+
+    def summary(self):
+        return {'byte_offsets_preserved': len(self.view) == len(self.source),
+                'shadow_sha256': hashlib.sha256(self.view).hexdigest(),
+                'normalized_regions': len(self.regions),
+                'kind_counts': {kind: sum(r['kind'] == kind for r in self.regions)
+                                for kind in sorted({r['kind'] for r in self.regions})},
+                'attribute_name_counts': {name: sum(name in r['names'] for r in self.regions)
+                                          for name in sorted({n for r in self.regions for n in r['names']})}}
+
+
+def _walk_all(node):
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(reversed(current.children))
 
 
 def _walk(node):
@@ -172,10 +884,11 @@ def _shape(kind='unknown', **kwargs):
 
 
 class Transformer:
-    def __init__(self, source, language, filename):
+    def __init__(self, source, language, filename, cpp_opaque_roots=()):
         self.source = source
         self.language = language
         self.filename = filename
+        self.cpp_opaque_roots = tuple(cpp_opaque_roots)
         self.prefix = 'nso_' + hashlib.sha256(source).hexdigest()[:16]
         while self.prefix.encode() in source:
             self.prefix += 'x'
@@ -197,6 +910,7 @@ class Transformer:
         self.literal_entries = {}
         self.type_records = {}
         self.type_cache = {}
+        self.type_context = None
         self.variables = []
         self.functions = {}
         self.initializer_map = {}
@@ -217,9 +931,18 @@ class Transformer:
             self.parser = Parser(Language(grammar.language()))
         except (ImportError, importlib.metadata.PackageNotFoundError) as error:
             self.fail('parser_dependency_missing', str(error))
-        self.tree = self.parser.parse(source)
+        if self.cpp_opaque_roots and language != 'cpp':
+            self.fail('cpp_opaque_policy_requires_cpp')
+        try:
+            self.shadow = _ParserShadow(source, language, self.parser, self.cpp_opaque_roots)
+        except Unsupported as error:
+            self.fail(str(error))
+        self.tree = self.shadow.tree
         self.root = self.tree.root_node
         self.nodes = list(_walk(self.root))
+        self.report['parser_normalization'] = self.shadow.summary()
+        if self.cpp_opaque_roots:
+            self.report['cpp_header_boundary'] = self.shadow.origins.summary()
 
     def text(self, node):
         return '' if node is None else self.source[node.start_byte:node.end_byte].decode('utf-8', errors='replace')
@@ -242,6 +965,77 @@ class Transformer:
         self.skipped_nodes.add(key)
         self.report['skipped'].append(dict(self.location(node), kind=kind, reason=reason, detail=detail))
 
+    def skip_region(self, start, end, reason, kind='string', detail=''):
+        key = (start, end, kind)
+        if key in self.skipped_nodes:
+            return
+        self.skipped_nodes.add(key)
+        line = self.source.count(b'\n', 0, start) + 1
+        column = start - (self.source.rfind(b'\n', 0, start) + 1) + 1
+        self.report['skipped'].append({'start_byte': start, 'end_byte': end,
+                                       'line': line, 'column': column,
+                                       'kind': kind, 'reason': reason, 'detail': detail})
+
+    def hidden_syntax(self):
+        # Masking a compiler annotation/type operand is not permission to lose
+        # its literals, __func__, or resource uses from the safety analysis.
+        literals = set()
+        for region in self.shadow.origins.ranges:
+            tokens = _lex(self.source[region['start']:region['end']])
+            i = 0
+            while i < len(tokens):
+                token = tokens[i]
+                if token.kind != 'string':
+                    i += 1
+                    continue
+                end = i + 1
+                while end < len(tokens) and tokens[end].kind == 'string':
+                    end += 1
+                start_byte = region['start'] + token.start
+                end_byte = region['start'] + tokens[end - 1].end
+                try:
+                    value = b''.join(_decode_ordinary(t.value) for t in tokens[i:end])
+                    status = _marker_status(value)
+                except Unsupported:
+                    status = 'target' if b'frida' in self.source[start_byte:end_byte].lower() else None
+                if status is not None:
+                    self.literal_candidates += 1
+                    self.skip_region(start_byte, end_byte, 'skipped_header_origin',
+                                     detail=', '.join(region['origins']))
+                i = end
+            for token in tokens:
+                if token.kind == 'identifier' and RESOURCE_NAME.fullmatch(token.value.decode('ascii', errors='replace')):
+                    start = region['start'] + token.start
+                    self.skip_region(start, region['start'] + token.end, 'skipped_header_origin',
+                                     'numeric-resource', ', '.join(region['origins']))
+        for region in self.shadow.regions:
+            if region['kind'] not in {'attribute', 'typeof', 'builtin-type', 'asm-declarator'}:
+                continue
+            reason = {'attribute': 'attribute_context', 'typeof': 'compile_time_or_type_context',
+                      'builtin-type': 'compile_time_or_type_context', 'asm-declarator': 'assembly_context'}[region['kind']]
+            tokens = self.shadow.hidden_tokens(region)
+            i = 0
+            while i < len(tokens):
+                token = tokens[i]
+                if token.kind == 'string':
+                    end = i + 1
+                    while end < len(tokens) and tokens[end].kind == 'string':
+                        end += 1
+                    key = (token.start, tokens[end - 1].end)
+                    if key not in literals:
+                        literals.add(key)
+                        try:
+                            value = b''.join(_decode_ordinary(t.value) for t in tokens[i:end])
+                            status = _marker_status(value)
+                        except Unsupported:
+                            status = 'target' if b'frida' in self.source[key[0]:key[1]].lower() else None
+                        if status is not None:
+                            self.literal_candidates += 1
+                            self.skip_region(*key, 'ordinary_friday' if status == 'ordinary_friday' else reason)
+                    i = end
+                else:
+                    i += 1
+
     def edit(self, start, end, replacement):
         if isinstance(replacement, str):
             replacement = replacement.encode('utf-8')
@@ -263,11 +1057,24 @@ class Transformer:
         parts = self.namespace(node) + [name]
         return ('::' if self.language == 'cpp' else '') + '::'.join(parts)
 
-    def _lookup_type_record(self, node, name):
+    def header_symbol_unknown(self, name):
+        if self.language != 'cpp':
+            return False
+        leaf = name.encode('utf-8').rsplit(b'::', 1)[-1].strip()
+        return leaf in self.shadow.origins.symbols
+
+    def _lookup_type_record(self, node, name, position=None, aggregate_kind=None):
+        # A hidden namespace typedef can shadow an otherwise visible owned
+        # declaration.  Its real qualifiers/layout cannot be inferred from the
+        # owned homonym; keep this type unknown rather than falling back.
+        if self.header_symbol_unknown(name):
+            return None
         scope = _scope(node)
         records = self.type_records.get(name, [])
-        visible = [r for r in records if r['start'] <= node.start_byte
-                   and scope[:len(r['scope'])] == r['scope']]
+        position = node.start_byte if position is None else position
+        visible = [r for r in records if r['start'] <= position
+                   and scope[:len(r['scope'])] == r['scope']
+                   and (aggregate_kind is None or r['node'].type == aggregate_kind)]
         if not visible:
             return None
         return max(visible, key=lambda r: (len(r['scope']), r['start']))
@@ -296,14 +1103,32 @@ class Transformer:
         return result
 
     def attributes(self, node):
-        return any(c.type in {'attribute_specifier', 'attribute_declaration', 'ms_declspec_modifier'}
-                   for c in _walk(node))
+        return self.shadow.attributes(node) or any(c.type in _ATTRIBUTE_NODE_TYPES for c in _walk(node))
 
     def base_type(self, node):
+        if (node is not None and node.type in {'struct_specifier', 'union_specifier', 'class_specifier'}
+                and node.child_by_field_name('body') is not None):
+            key = ('aggregate', node.id)
+            if key in self.type_cache:
+                return self.type_cache[key]
+            # Real Linux/GLib headers contain self-referential tagged structs;
+            # their pointer fields must not recurse indefinitely during layout
+            # collection.  An unresolved recursive member stays unsafe.
+            self.type_cache[key] = _shape(unsafe='recursive_type')
+            result = self._base_type(node)
+            self.type_cache[key] = result
+            return result
+        return self._base_type(node)
+
+    def _base_type(self, node):
         if node is None:
             return _shape()
+        if self.shadow.within(node, {'typeof'}):
+            return _shape(unsafe='compiler_inferred_type')
+        if self.shadow.within(node, {'member-pointer'}) or node.id in self.shadow.type_contexts:
+            return _shape(unsafe='cpp_member_pointer_type')
         if node.type in {'primitive_type', 'sized_type_specifier'}:
-            name = ' '.join(self.text(node).split())
+            name = ' '.join(self.shadow.view[node.start_byte:node.end_byte].decode('utf-8').split())
             if name in {'char', 'signed char', 'unsigned char'}:
                 return _shape('byte', spelling=name)
             if name == 'void':
@@ -323,13 +1148,18 @@ class Transformer:
                 result = self.base_type(record['node'])
             else:
                 result = self.declared_type(record['node'], record['declarator'])
-            self.type_cache[key] = result
+            if result.get('unsafe') == 'unresolved_aggregate_type':
+                # A forward typedef can become complete before a later use.
+                self.type_cache.pop(key, None)
+            else:
+                self.type_cache[key] = result
             return result
         if node.type in {'struct_specifier', 'union_specifier', 'class_specifier'}:
             body = node.child_by_field_name('body')
             if body is None:
                 name = node.child_by_field_name('name')
-                record = self._lookup_type_record(node, self.text(name)) if name is not None else None
+                position = self.type_context.start_byte if self.type_context is not None else node.start_byte
+                record = self._lookup_type_record(node, self.text(name), position, node.type) if name is not None else None
                 return self.base_type(record['node']) if record is not None and record['node'] != node else _shape(unsafe='unresolved_aggregate_type')
             if node.type != 'struct_specifier':
                 return _shape(unsafe='union_or_class_layout')
@@ -361,7 +1191,7 @@ class Transformer:
         if node.type == 'init_declarator':
             return self.apply_declarator(base, child)
         if node.type in {'pointer_declarator', 'abstract_pointer_declarator'}:
-            result = self.qualifiers(node, _shape('pointer', pointee=base))
+            result = self.qualifiers(node, _shape('pointer', pointee=base, unsafe=base.get('unsafe')))
             return self.apply_declarator(result, child)
         if node.type in {'array_declarator', 'abstract_array_declarator'}:
             count = None
@@ -371,7 +1201,7 @@ class Transformer:
                     count = _integer(self.source[size.start_byte:size.end_byte])
                 except (Unsupported, ValueError, UnicodeError):
                     pass
-            return self.apply_declarator(_shape('array', element=base, count=count, size_node=size), child)
+            return self.apply_declarator(_shape('array', element=base, count=count, size_node=size, unsafe=base.get('unsafe')), child)
         if node.type in {'function_declarator', 'abstract_function_declarator'}:
             result = _shape('function', returns=base, parameters=node.child_by_field_name('parameters'))
             return self.apply_declarator(result, child)
@@ -381,8 +1211,23 @@ class Transformer:
         return _shape(unsafe='unsupported_declarator')
 
     def declared_type(self, declaration, declarator):
-        base = self.qualifiers(declaration, self.base_type(declaration.child_by_field_name('type')))
-        return self.apply_declarator(base, declarator)
+        if (declaration.id in self.shadow.type_contexts
+                or self.shadow.within(declarator, {'member-pointer'})):
+            return _shape(unsafe='cpp_member_pointer_type')
+        previous_context = self.type_context
+        if previous_context is None:
+            self.type_context = declaration
+        try:
+            base = self.qualifiers(declaration, self.base_type(declaration.child_by_field_name('type')))
+            result = self.apply_declarator(base, declarator)
+        finally:
+            self.type_context = previous_context
+        # An attribute on a typedef/field changes the assumptions of *every*
+        # object using that type, even when its parser-shadow spelling is blank.
+        if declaration.type in {'type_definition', 'field_declaration', 'parameter_declaration', 'optional_parameter_declaration'} and self.attributes(declaration):
+            result = copy.copy(result)
+            result['unsafe'] = 'type_or_field_attributes'
+        return result
 
     def collect_variables_and_functions(self):
         for node in self.nodes:
@@ -535,6 +1380,8 @@ class Transformer:
 
     def static_problem(self, variable):
         node = variable['node']
+        if self.header_symbol_unknown(variable['name']):
+            return 'static_reference_header_origin'
         if self.attributes(node):
             return 'static_storage_attributes'
         if any(self.text(c) in {'_Thread_local', 'thread_local', '__thread'} for c in node.named_children):
@@ -569,6 +1416,12 @@ class Transformer:
 
     def compiletime_reason(self, node):
         for parent in _parents(node):
+            if parent.type in {'declaration', 'field_declaration', 'function_definition'} and self.shadow.attached(parent, 'deleted-function'):
+                return 'deleted_function_context'
+            if parent.id in self.shadow.type_contexts:
+                return 'cpp_member_pointer_type_context'
+            if parent.type == 'call_expression' and self.shadow.attached(parent, 'operator-id'):
+                return 'cpp_explicit_operator_call'
             if parent.type in {'sizeof_expression', 'alignof_expression', 'alignof', 'offsetof_expression'}:
                 return 'sizeof_or_alignment_context'
             if parent.type in {'gnu_asm_expression', 'asm_statement'}:
@@ -619,10 +1472,17 @@ class Transformer:
                 # array expression itself; decaying the array keeps that type.
                 return None
             callee = self.text(parent.child_by_field_name('function'))
+            # Hidden header overloads may win over an owned signature (notably
+            # array-reference vs pointer overloads).  Decaying a literal or a
+            # numeric resource must not change that choice.
+            if self.header_symbol_unknown(callee):
+                return 'cpp_header_origin_call_parameter'
             signatures = self.functions.get(callee, [])
             if not signatures or index is None:
                 return 'unresolved_cpp_call_parameter'
             for declaration, signature in signatures:
+                if self.shadow.attached(declaration, 'deleted-function'):
+                    return 'cpp_deleted_call_parameter'
                 if any(p.type == 'template_declaration' for p in _parents(declaration)):
                     return 'cpp_template_call_parameter'
                 params = signature['parameters']
@@ -638,6 +1498,8 @@ class Transformer:
                     shape = _shape('pointer', pointee=shape['element'])
                 if shape['kind'] != 'pointer' or shape['pointee']['kind'] not in {'byte', 'void'}:
                     return 'cpp_nonpointer_call_parameter'
+                if shape.get('unsafe') or shape['pointee'].get('unsafe'):
+                    return 'cpp_attributed_or_unknown_call_parameter'
             return None
         return None
 
@@ -655,6 +1517,10 @@ class Transformer:
                 return ('dynamic', None, None), self.cpp_call_problem(node)
             if reason:
                 return None, reason
+            if shape.get('unsafe'):
+                return None, shape['unsafe']
+            if self.attributes(variable['node']) and not variable['static']:
+                return None, 'declaration_attributes'
             if shape['kind'] != 'pointer' or shape['pointee']['kind'] not in {'byte', 'void'}:
                 return None, 'nonpointer_or_unknown_initializer_type'
             if variable['static']:
@@ -675,7 +1541,8 @@ class Transformer:
                     function = next((p for p in _parents(parent) if p.type == 'function_definition'), None)
                     declarator = function.child_by_field_name('declarator') if function is not None else None
                     shape = self.declared_type(function, declarator) if function is not None else _shape()
-                    if shape['kind'] != 'function' or shape['returns']['kind'] != 'pointer':
+                    if (shape['kind'] != 'function' or shape['returns']['kind'] != 'pointer'
+                            or shape['returns'].get('unsafe')):
                         return None, 'cpp_nonpointer_or_deduced_return'
                     break
         return ('dynamic', None, None), None
@@ -790,6 +1657,8 @@ class Transformer:
             raise Unsupported('resource_not_const_byte_array')
         if self.attributes(variable['node']):
             raise Unsupported('resource_storage_attributes')
+        if shape.get('unsafe') or shape['element'].get('unsafe'):
+            raise Unsupported('resource_type_attributes_or_unknown')
         value = variable['value']
         if value is None or value.type != 'initializer_list':
             raise Unsupported('resource_not_numeric_initializer')
@@ -829,6 +1698,16 @@ class Transformer:
                 value = self.numeric_bytes(variable)
             except Unsupported as error:
                 self.skip(variable['node'], str(error), 'numeric-resource', variable['name'])
+                continue
+            if variable['name'].encode('utf-8') in self.shadow.origins.symbols:
+                self.skip(variable['node'], 'resource_reference_header_origin', 'numeric-resource', variable['name'])
+                continue
+            hidden_reference = next((r for r in self.shadow.regions
+                                     if r['kind'] in {'attribute', 'typeof', 'builtin-type', 'asm-declarator'}
+                                     and any(t.kind == 'identifier' and t.value == variable['name'].encode('utf-8')
+                                             for t in self.shadow.hidden_tokens(r))), None)
+            if hidden_reference is not None:
+                self.skip(variable['node'], 'resource_reference_hidden_compiler_context', 'numeric-resource', variable['name'])
                 continue
             qualified_uses = [n for n in self.nodes if n.type == 'qualified_identifier'
                               and any(self.text(c) == variable['name'] for c in n.named_children)
@@ -979,16 +1858,25 @@ static const %(element)s * %(getter)s (void)
 
     def validate_input(self):
         if self.root.has_error:
-            errors = [n for n in self.nodes if n.type == 'ERROR' or n.is_missing]
+            errors = [n for n in _walk_all(self.root) if n.type == 'ERROR' or n.is_missing]
             for node in errors[:20]:
-                self.report['failures'].append(dict(self.location(node), reason='parse_error', detail=self.text(node)[:120]))
+                self.report['failures'].append(dict(self.location(node), reason='parse_error', detail=self.text(node)[:120],
+                                                    context=self.source[max(0, node.start_byte - 160):node.end_byte + 160].decode('utf-8', errors='replace')[:440]))
             self.fail('input_does_not_parse')
         for node in self.nodes:
             if not node.type.startswith('preproc_') or node.type in {'preproc_directive', 'preproc_arg'}:
                 continue
             raw = self.source[node.start_byte:node.end_byte]
-            if node.type == 'preproc_call' and re.match(rb'^\s*#\s*(?:line\s+)?[0-9]+\s+"[^"\r\n]*"(?:\s+[0-9]+)*\s*$', raw):
-                continue
+            if node.type == 'preproc_call':
+                if re.match(rb'^\s*#\s*(?:line\s+)?[0-9]+\s+"[^"\r\n]*"(?:\s+[0-9]+)*\s*$', raw):
+                    continue
+                # Compiler-emitted diagnostic pragmas survive -E/-P, and do
+                # not define a macro or affect object layout.  All other
+                # directives (notably pack/attribute pragmas) stay fail-closed.
+                if re.fullmatch(rb'\s*#\s*pragma\s+(?:GCC|clang)\s+diagnostic\s+(?:push|pop|(?:ignored|warning|error)\s+"-W[A-Za-z0-9_=+.,-]+")\s*', raw):
+                    continue
+                if re.fullmatch(rb'\s*#\s*pragma\s+(?:GCC\s+system_header|clang\s+system_header|once)\s*', raw):
+                    continue
             self.fail('input_not_fully_preprocessed', self.text(node)[:120], node)
         # AST parsing is not a substitute for the build's semantic compiler gate.
 
@@ -996,6 +1884,7 @@ static const %(element)s * %(getter)s (void)
         self.validate_input()
         self.collect_types()
         self.collect_variables_and_functions()
+        self.hidden_syntax()
         self.literals()
         self.function_names()
         self.resources()
@@ -1018,8 +1907,15 @@ static const %(element)s * %(getter)s (void)
         output = b''.join(parts)
         if self.entries:
             prelude, suffix = self.runtime(global_objects)
-            output = prelude + output + suffix
-            if self.parser.parse(output).root_node.has_error:
+            if self.cpp_opaque_roots:
+                output = _SYNTHETIC_ORIGIN + prelude + output + b'\n' + _SYNTHETIC_ORIGIN + suffix
+            else:
+                output = prelude + output + suffix
+            try:
+                generated = _ParserShadow(output, self.language, self.parser, self.cpp_opaque_roots)
+            except Unsupported as error:
+                self.fail('generated_source_header_boundary', str(error))
+            if generated.tree.root_node.has_error:
                 self.fail('generated_source_does_not_parse')
         self.report['entries'] = [{
             'id': e['id'], 'kind': e['kind'], 'byte_length': len(e['value']),
@@ -1049,23 +1945,23 @@ static const %(element)s * %(getter)s (void)
         return output, self.report
 
 
-def outline_source(source, language='c', filename='<input>'):
+def outline_source(source, language='c', filename='<input>', cpp_opaque_roots=()):
     if language not in {'c', 'cpp'}:
         raise ValueError('language must be c or cpp')
     if isinstance(source, str):
         source = source.encode('utf-8')
     if not isinstance(source, bytes):
         raise TypeError('source must be bytes or str')
-    return Transformer(source, language, filename).run()
+    return Transformer(source, language, filename, cpp_opaque_roots).run()
 
 
-def outline_file(input_path, output_path, report_path, language='c'):
+def outline_file(input_path, output_path, report_path, language='c', cpp_opaque_roots=()):
     input_path, output_path, report_path = map(Path, (input_path, output_path, report_path))
     resolved = [p.resolve() for p in (input_path, output_path, report_path)]
     if len(set(resolved)) != 3:
         raise ValueError('input, output, and report paths must be distinct')
     try:
-        output, report = outline_source(input_path.read_bytes(), language, str(input_path))
+        output, report = outline_source(input_path.read_bytes(), language, str(input_path), cpp_opaque_roots)
     except OutlineError as error:
         report_path.write_text(json.dumps(error.report, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
         # A failed invocation must not leave a stale successful output to compile.
@@ -1083,9 +1979,11 @@ def main(argv=None):
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--report', '--reportJSON', dest='report', required=True, type=Path)
     parser.add_argument('--language', choices=('c', 'cpp'), required=True)
+    parser.add_argument('--cpp-opaque-root', action='append', default=[], type=Path,
+                        help='Explicit external C++ header subtree for a balanced parser-only boundary')
     args = parser.parse_args(argv)
     try:
-        report = outline_file(args.input, args.output, args.report, args.language)
+        report = outline_file(args.input, args.output, args.report, args.language, args.cpp_opaque_root)
     except (OutlineError, OSError, ValueError) as error:
         print('string outlining failed: ' + str(error), file=sys.stderr)
         return 1

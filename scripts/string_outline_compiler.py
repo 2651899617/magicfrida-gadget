@@ -20,13 +20,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
 
-WRAPPER_VERSION = '1.0'
+WRAPPER_VERSION = '1.1'
 CONFIG_SCHEMA = 1
+CPP_HEADER_POLICY = 'explicit-cpp-header-origins-v1'
 _SOURCE_LANGUAGES = {'.c': 'c', '.C': 'cpp', '.cc': 'cpp', '.cp': 'cpp',
                      '.cpp': 'cpp', '.cxx': 'cpp', '.c++': 'cpp'}
 _VALUE_OPTIONS = {
@@ -106,6 +109,8 @@ def load_config(path):
         raise OutlineBuildError('unsupported response-file format')
     if config['version'] not in {'16.7.19', '17.25.2'}:
         raise OutlineBuildError('unsupported pinned Frida version')
+    if config.get('cpp_header_policy') != CPP_HEADER_POLICY:
+        raise OutlineBuildError('unsupported C++ header origin policy; prepare again')
     actual_wrapper = Path(__file__).absolute()
     if actual_wrapper.resolve() != Path(config['wrapper']).resolve():
         raise OutlineBuildError('executed wrapper path differs from installed configuration')
@@ -578,6 +583,72 @@ def compiler_identity(command, cwd, config, language):
     return result
 
 
+def cpp_header_origin_roots(argv, unit, config, cwd):
+    """Select concrete libc++/V8/Highway roots; keep core/gum and C headers parsed."""
+    if unit.language != 'cpp':
+        return []
+    candidates = []
+    executable = absolute_path(argv[0], cwd)
+    if not executable.is_file():
+        found = shutil.which(argv[0])
+        if found:
+            executable = Path(found).resolve()
+    if executable.is_file():
+        candidates.append(executable.parent.parent / 'sysroot' / 'usr' / 'include' / 'c++' / 'v1')
+    index = 1
+    while index < len(argv):
+        value = argv[index]
+        include = None
+        sysroot = None
+        if value in {'-I', '-isystem', '-iquote', '-idirafter', '-isysroot', '--sysroot'}:
+            if index + 1 >= len(argv):
+                raise OutlineBuildError('missing header path for ' + value)
+            if value in {'-isysroot', '--sysroot'}:
+                sysroot = argv[index + 1]
+            else:
+                include = argv[index + 1]
+            index += 2
+        elif value.startswith('--sysroot='):
+            sysroot = value[len('--sysroot='):]
+            index += 1
+        elif value.startswith('-I') and len(value) > 2:
+            include = value[2:]
+            index += 1
+        elif value.startswith('-isystem') and len(value) > len('-isystem'):
+            include = value[len('-isystem'):]
+            index += 1
+        elif value in _VALUE_OPTIONS:
+            index += 2
+        else:
+            index += 1
+        if sysroot:
+            candidates.append(absolute_path(sysroot, cwd) / 'usr' / 'include' / 'c++' / 'v1')
+        if include:
+            directory = absolute_path(include, cwd)
+            if directory.name == 'v1' and directory.parent.name == 'c++':
+                candidates.append(directory)
+            elif re.fullmatch(r'v8-\d+\.\d+', directory.name):
+                candidates.append(directory)
+            elif directory.name in {'hwy', 'highway'}:
+                candidates.append(directory if directory.name == 'hwy' else directory / 'hwy')
+            if (directory / 'hwy').is_dir():
+                candidates.append(directory / 'hwy')
+    roots = []
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        root = candidate.resolve()
+        owned_roots = [(Path(config['source_root']) / 'subprojects' / name).resolve()
+                       for name in ('frida-core', 'frida-gum')]
+        if any(is_within(root, owned) or is_within(owned, root) for owned in owned_roots):
+            raise OutlineBuildError('C++ opaque header root overlaps owned core/gum source: ' + str(root))
+        if is_within(unit.source, root):
+            raise OutlineBuildError('C++ opaque header root contains the compilation source: ' + str(root))
+        if str(root) not in roots:
+            roots.append(str(root))
+    return roots
+
+
 def regular_output(path, directory):
     if path.is_symlink() or not path.is_file() or not is_within(path, directory):
         raise OutlineBuildError(f'compiler/outliner output is missing or not an isolated regular file: {path}')
@@ -614,8 +685,14 @@ def compile_outlined(command, arguments, unit, config, cwd, build_root):
             edits, dependencies = dependency_edits(arguments.flat)
             preprocessing_edits = {**edits, **{index: [] for index in unit.output_indices}}
             for index, value in enumerate(arguments.flat):
-                if value == '-c':
+                if value == '-c' or (unit.language == 'cpp' and value == '-P'):
                     preprocessing_edits[index] = []
+                if unit.language == 'cpp' and (
+                        (value.startswith('-Wp,') and '-P' in value[4:].split(',')) or
+                        (value in {'-Xpreprocessor', '-Xclang'} and index + 1 < len(arguments.flat)
+                         and arguments.flat[index + 1] == '-P') or
+                        value in {'-Xpreprocessor=-P', '-Xclang=-P'}):
+                    raise OutlineBuildError('C++ outlining requires compiler line origins; wrapped -P is unsupported')
             depfile = absolute_path(dependencies.file or str(unit.output.with_suffix('.d')), cwd)
             if depfile.resolve() == unit.source.resolve() or depfile.resolve() == unit.output.resolve():
                 raise OutlineBuildError('dependency file aliases original source or object')
@@ -624,7 +701,12 @@ def compile_outlined(command, arguments, unit, config, cwd, build_root):
                 targets = ['-MQ', str(unit.output)]
             maps = prefix_map_flags(config, cwd, unit)
             dependency_args = [dependencies.mode, '-MF', str(depfile), *targets, *dependencies.switches]
-            preprocess_extra = [*maps, '-E', '-P', '-o', str(preprocessed), *dependency_args]
+            cpp_roots = cpp_header_origin_roots(arguments.flat, unit, config, cwd)
+            preprocess_extra = [*maps, '-E', *(['-P'] if unit.language == 'c' else []),
+                                '-o', str(preprocessed), *dependency_args]
+            report['cpp_header_policy'] = CPP_HEADER_POLICY if unit.language == 'cpp' else None
+            report['cpp_opaque_roots'] = cpp_roots
+            report['compiler_line_origins_preserved'] = unit.language == 'cpp'
             preprocess_command = arguments.render(preprocessing_edits, preprocess_extra, directory, 'preprocess')
             report['preprocess_command'] = preprocess_command
             report['preprocess_expanded_argv'] = arguments.expanded(preprocessing_edits, preprocess_extra)
@@ -640,7 +722,8 @@ def compile_outlined(command, arguments, unit, config, cwd, build_root):
                                                               Path(config['config_path']), Path(config['outliner'])])
             outline_command = [config['python'], '-I', config['outliner'],
                                '--input', str(preprocessed), '--output', str(transformed),
-                               '--report', str(outline_report), '--language', unit.language]
+                               '--report', str(outline_report), '--language', unit.language,
+                               *[value for root in cpp_roots for value in ('--cpp-opaque-root', root)]]
             report['outline_command'] = outline_command
             result = subprocess.run(outline_command, cwd=directory)
             returncode = result.returncode

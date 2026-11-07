@@ -83,6 +83,25 @@ class ReadableLoadTests(unittest.TestCase):
                 # Server/helper reports retain real counts; only embedded Agents have the app threshold.
                 self.assertEqual(elf.require_readable_load_budget(data, 'helper'), result)
 
+    def test_nonzero_callbacks_required_but_zero_marker_matches_allowed(self):
+        for bits in (32, 64):
+            empty_scan = fixture([(4, b'\0' * 32)], bits)
+            result = elf.readable_load_audit(empty_scan)
+            self.assertGreater(result['total_readable_load_filesz'], 0)
+            self.assertEqual(result['total_printable_string_callbacks'], 0)
+            self.assertEqual(result['total_frida_matching_callbacks'], 0)
+            for kind in ('agent', 'gadget'):
+                with self.subTest(bits=bits, kind=kind):
+                    with self.assertRaisesRegex(ValueError, 'no printable callbacks'):
+                        elf.require_readable_load_budget(empty_scan, kind)
+            self.assertEqual(elf.require_readable_load_budget(empty_scan, 'helper'), result)
+            clean_scan = fixture([(4, b'nianchu-cache\0ABCDE')], bits)
+            clean = elf.readable_load_audit(clean_scan)
+            self.assertGreater(clean['total_printable_string_callbacks'], 0)
+            self.assertEqual(clean['total_frida_matching_callbacks'], 0)
+            for kind in ('agent', 'gadget'):
+                self.assertEqual(elf.require_readable_load_budget(clean_scan, kind), clean)
+
     def test_program_header_order_filesz_and_read_permission(self):
         data = fixture([(4, b'frida-first\0'), (0, b'frida-unreadable\0'),
                         (5, b'frida-second\0'), (6, b'Frida-third\0')])

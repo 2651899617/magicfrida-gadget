@@ -4,6 +4,8 @@
 CI: install the three PARSER_PINS and run unittest discovery.  GCC/Clang host
 execution is required when STRING_OUTLINE_REQUIRE_HOST=1.  Optional
 STRING_OUTLINE_CC and STRING_OUTLINE_CXX select already installed compilers.
+STRING_OUTLINE_ANDROID_CLANG selects an installed NDK clang for actual Bionic
+C/C++ preprocessing and cross-compilation (required with REQUIRE_ANDROID=1).
 """
 
 import importlib.util
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts' / 'outline_elf_strings.py'
@@ -69,7 +72,7 @@ class OutlineTests(unittest.TestCase):
     def transform(self, source, language='c'):
         return outline.outline_source(source, language)
 
-    def compile_run(self, source, language='c', extra_flags=(), execute=True):
+    def compile_run(self, source, language='c', extra_flags=(), execute=True, input_language=None):
         cc = compiler(language)
         if cc is None:
             if os.environ.get('STRING_OUTLINE_REQUIRE_HOST') == '1':
@@ -85,7 +88,7 @@ class OutlineTests(unittest.TestCase):
             binary = root / ('unit.exe' if os.name == 'nt' else 'unit')
             unit.write_bytes(source)
             args = [cc, '-std=gnu++11' if language == 'cpp' else '-std=gnu11',
-                    '-x', 'c++-cpp-output' if language == 'cpp' else 'cpp-output',
+                    '-x', input_language or ('c++-cpp-output' if language == 'cpp' else 'cpp-output'),
                     '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                     str(unit), '-o', str(binary), *extra_flags]
             built = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60)
@@ -519,6 +522,788 @@ static auto inferred(void) {return "FridaInferred";}
         self.assertIn('cpp_nonpointer_call_parameter', reasons)
         self.assertIn('cpp_nonpointer_or_deduced_return', reasons)
         self.assertEqual(output, source.encode())
+    def test_compiler_shadow_offsets_and_original_semantic_tokens(self):
+        extensions = r'''
+typedef __signed__ char AndroidSignedByte;
+typedef __signed__ int AndroidSignedInt;
+typedef __signed__ __int128 AndroidSigned128;
+const char * _Nullable android_api(const void * _Nonnull);
+enum E { OLD __attribute__((__deprecated__("frida annotation"))) = 1, NEW = 2 };
+extern int renamed(void) __asm__("frida_linker_name");
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                source = (extensions + GLIB_HOST + r'''
+static const char *name(void) { return "FridaParserOffset"; }
+''').encode()
+                transformer = outline.Transformer(source, language, 'android.i')
+                self.assertEqual(len(transformer.shadow.view), len(source))
+                self.assertEqual([i for i, c in enumerate(source) if c in (10, 13)],
+                                 [i for i, c in enumerate(transformer.shadow.view) if c in (10, 13)])
+                self.assertFalse(transformer.root.has_error)
+                output, report = transformer.run()
+                self.assertIn(extensions.encode(), output)
+                occurrence = next(o for o in report['occurrences'] if o['kind'] == 'string')
+                self.assertEqual(source[occurrence['start_byte']:occurrence['end_byte']], b'"FridaParserOffset"')
+                self.assertEqual({s['reason'] for s in report['skipped']}, {'attribute_context', 'assembly_context'})
+                self.assertTrue(report['parser_normalization']['byte_offsets_preserved'])
+                self.assertEqual(report['parser_normalization']['kind_counts']['nullability'], 2)
+
+    def test_shadow_lexer_does_not_touch_comments_literals_or_directives(self):
+        source = r'''# 1 "__signed__ _Nullable frida-file.c"
+/* __attribute__((packed)) _Nullable typeof(invalid +) */
+const char *spelling = "__signed__ _Nullable __attribute__((packed))";
+char token = '_';
+const char *raw = R"tag(__signed__ _Nullable __attribute__((packed)) typeof(invalid +))tag";
+'''.encode()
+        transformer = outline.Transformer(source, 'cpp', 'tokens.ii')
+        self.assertFalse(transformer.root.has_error)
+        self.assertEqual(transformer.shadow.view, source)
+        self.assertEqual(transformer.shadow.regions, [])
+        output, report = transformer.run()
+        self.assertEqual(output, source)
+        self.assertTrue(report['ok'])
+
+    def test_masked_attribute_type_static_resource_and_cleanup_safety(self):
+        source = GLIB_HOST + r'''
+typedef char AttributedByte __attribute__((may_alias));
+struct __attribute__((packed)) Packed { const char *name; };
+struct Suffix { const char *name; } __attribute__((packed));
+static const struct Packed packed={"frida-packed"};
+static const struct Suffix suffix={"frida-suffix-packed"};
+__attribute__((section("custom"))) static const char *sectioned="frida-section";
+static AttributedByte *attributed="frida-typedef";
+static const unsigned char gumjs_annotated_bytecode[] __attribute__((aligned(16)))={70,114,105,100,97};
+void clear(char **p) {(void)p;}
+void f(void) {
+  char *p __attribute__((cleanup(clear)))="FridaCleanup";
+  (void)p;
+}
+'''
+        output, report = self.transform(source)
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['summary']['heap_buffers'], 0)
+        reasons = {s['reason'] for s in report['skipped']}
+        self.assertIn('aggregate_attributes_or_packing', reasons)
+        self.assertIn('static_storage_attributes', reasons)
+        self.assertIn('type_or_field_attributes', reasons)
+        self.assertIn('declaration_attributes', reasons)
+        self.assertIn('resource_storage_attributes', reasons)
+
+    def test_hidden_type_operands_resource_reference_and_unknown_types(self):
+        source = GLIB_HOST + r'''
+static const unsigned char gumjs_typed_bytecode[]={70,114,105,100,97};
+void f(void) {
+  __typeof__(gumjs_typed_bytecode) *p=0;
+  __typeof__("FridaTypeOperand") label="FridaTypedArray";
+  __typeof__(int *) typed=0;
+  (void)p; (void)label; (void)typed;
+}
+'''
+        output, report = self.transform(source)
+        self.assertEqual(output, source.encode())
+        reasons = {s['reason'] for s in report['skipped']}
+        self.assertIn('compile_time_or_type_context', reasons)
+        self.assertIn('compiler_inferred_type', reasons)
+        self.assertIn('resource_reference_hidden_compiler_context', reasons)
+        self.assertEqual(report['summary']['resources_transformed'], 0)
+
+    def test_builtin_type_operands_do_not_hide_value_arguments(self):
+        source = GLIB_HOST + r'''
+void f(void *vl) {
+  const char *p=__builtin_va_arg(vl,const char *);
+  void *q=__builtin_va_arg(vl,void **);
+  int same=__builtin_types_compatible_p(const char *,char *);
+  (void)p; (void)q; (void)same;
+}
+const char *name(void){return "FridaBuiltinType";}
+'''
+        output, report = self.transform(source)
+        self.assertIn(b'__builtin_va_arg(vl,const char *)', output)
+        self.assertIn(b'__builtin_types_compatible_p(const char *,char *)', output)
+        self.assertEqual(report['parser_normalization']['kind_counts']['builtin-type'], 4)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+
+    def test_diagnostic_pragmas_allowed_but_layout_or_macro_directives_fail(self):
+        pragmas = '#pragma clang diagnostic push\n#pragma clang diagnostic ignored "-Wdeprecated-declarations"\n#pragma clang diagnostic pop\n'
+        output, report = self.transform(pragmas + GLIB_HOST + 'const char *f(void){return "FridaPragma";}')
+        self.assertTrue(report['ok'])
+        self.assertIn(pragmas.encode(), output)
+        for source in ('#pragma pack(push,1)\n', '#pragma clang attribute push (__attribute__((packed)), apply_to=record)\n',
+                       '#define _Nullable\n', '#pragma message("frida")\n'):
+            with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source)
+            self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_not_fully_preprocessed')
+
+    def test_malformed_or_unknown_extensions_never_hide_parse_errors(self):
+        samples = [
+            'enum E{A __attribute__((unknown_vendor_attribute))=1};',
+            'enum E{A __attribute__((deprecated("x"))) += 1};',
+            'enum E{A __attribute__((deprecated("x")) = 1};',
+            'void f(void){typeof (int +) value;}',
+            'void f(void){__builtin_va_arg(vl, int +);}',
+            'int x __asm__("name", 1);',
+            'int x __attribute__((unused)); void f( {',
+        ]
+        for source in samples:
+            with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source)
+            report = caught.exception.report
+            self.assertEqual(report['failures'][-1]['reason'], 'input_does_not_parse')
+            for error in report['failures'][:-1]:
+                self.assertLessEqual(len(error['context']), 440)
+                self.assertIn('start_byte', error)
+
+    def test_forward_typedef_and_recursive_header_structs(self):
+        source = GLIB_HOST + r'''
+typedef struct _Value Value;
+struct _Value { int number; const char *name; struct _Value *next; };
+static const Value values[]={{1,"FridaForward",0}};
+'''
+        source += 'int main(void){require(values[0].number==1);require(strcmp(values[0].name,%s)==0);return 0;}' % c_string('FridaForward')
+        output, report = self.transform(source)
+        self.assertEqual(report['skipped'], [])
+        self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+        self.compile_run(output)
+
+    def test_host_compiler_enum_asm_typeof_semantics_preserved(self):
+        source = GLIB_HOST + r'''
+typedef __signed__ char SignedByte;
+enum E { OLD __attribute__((deprecated))=7, CURRENT=7 };
+static const char *alias_api(void) __asm__("outlined_alias_api");
+static const char *alias_api(void) { return "FridaGNUAlias"; }
+int main(void) {
+  __typeof__(*alias_api()) byte=alias_api()[0];
+  require(byte=='F' && CURRENT==7 && sizeof(SignedByte)==1);
+  require(strcmp(alias_api(),EXPECTED)==0);
+  return 0;
+}
+'''
+        source = source.replace('EXPECTED', c_string('FridaGNUAlias'))
+        output, report = self.transform(source)
+        self.assertEqual(report['skipped'], [])
+        self.assertIn(b'__asm__("outlined_alias_api")', output)
+        self.assertIn(b'__typeof__(*alias_api())', output)
+        self.compile_run(output)
+
+    def test_cpp_deleted_and_member_pointer_metadata_fail_closed(self):
+        source = GLIB_HOST + r'''
+struct C {};
+void deleted(const char *text="FridaDeletedDefault") = delete;
+static const char * C::*member="FridaMemberPointerSlot";
+static const char *ordinary="FridaOrdinaryPointer";
+void use(void) { deleted("FridaDeletedArgument"); }
+'''
+        output, report = self.transform(source, 'cpp')
+        reasons = {s['reason'] for s in report['skipped']}
+        self.assertIn('lambda_default_or_field_context', reasons)
+        self.assertIn('cpp_deleted_call_parameter', reasons)
+        self.assertIn('cpp_member_pointer_type_context', reasons)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+        self.assertEqual(report['static_objects'][0]['name'], '::ordinary')
+        self.assertIn(b'= delete;', output)
+        self.assertIn(b'const char * C::*member="FridaMemberPointerSlot";', output)
+        self.assertEqual(report['parser_normalization']['kind_counts']['deleted-function'], 1)
+        self.assertEqual(report['parser_normalization']['kind_counts']['member-pointer'], 1)
+
+    def test_cpp_member_pointer_template_cv_ref_noexcept_projection(self):
+        suffixes = ('', 'const', 'volatile', 'const volatile', '&', 'const&',
+                    'const volatile&', '&&', 'const volatile&&', 'noexcept')
+        source = 'template<class>struct S;\n'
+        for index, suffix in enumerate(suffixes):
+            source += 'template<class R,class C,class...P> struct S<R (C::*)(P...,...) %s> { enum {value=%d}; };\n' % (suffix, index)
+        source += 'template<class R,class C> struct S<R C::*> {};\n'
+        source += 'template<class R,class C> struct S<R *> {};\n'
+        transformer = outline.Transformer(source.encode(), 'cpp', 'member.ii')
+        self.assertFalse(transformer.root.has_error)
+        self.assertEqual(transformer.shadow.summary()['kind_counts']['member-pointer'], len(suffixes)+1)
+        output, report = transformer.run()
+        self.assertEqual(output, source.encode())
+        self.assertTrue(report['ok'])
+        for suffix in suffixes:
+            self.assertIn(('(P...,...) %s>' % suffix).encode(), output)
+
+    def test_cpp_explicit_operator_keeps_receiver_values_and_resources(self):
+        source = GLIB_HOST + r'''
+static const unsigned char gumjs_operator_bytecode[]={70,114,105,100,97};
+void f(void) {
+  receiver().operator()("FridaOperatorArgument",gumjs_operator_bytecode);
+  receiver().operator[]("FridaOperatorIndex");
+}
+'''
+        output, report = self.transform(source, 'cpp')
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['summary']['resources_transformed'], 0)
+        reasons = {s['reason'] for s in report['skipped']}
+        self.assertIn('cpp_explicit_operator_call', reasons)
+        self.assertIn('resource_reference_cpp_explicit_operator_call', reasons)
+        self.assertEqual(report['parser_normalization']['kind_counts']['operator-id'], 2)
+        transformer = outline.Transformer(source.encode(), 'cpp', 'operators.ii')
+        self.assertIn(b'receiver()._nso_op', transformer.shadow.view)
+        self.assertIn(b'"FridaOperatorArgument",gumjs_operator_bytecode', transformer.shadow.view)
+
+    def test_cpp_underlying_type_unknown_and_malformed_projection_rejected(self):
+        source = GLIB_HOST + r'''
+enum E { FIRST=1 };
+typedef __underlying_type(E) Underlying;
+static Underlying *p="FridaCompilerUnderlyingType";
+'''
+        output, report = self.transform(source, 'cpp')
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['skipped'][0]['reason'], 'compiler_inferred_type')
+        for broken in ('int (*p)() = delete;', 'template<class R,class C>struct S<R C::*> {void f( { };',
+                       'template<class R,class C>struct S<R (C::*)(int +)> {};',
+                       'void f(){obj.operator()("frida", +);}',
+                       'typedef __underlying_type(E +) T;'):
+            with self.subTest(broken=broken), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(broken, 'cpp')
+            self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_does_not_parse')
+
+    def test_host_cpp_standard_pointer_member_and_deleted_semantics(self):
+        size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+        host = GLIB_HOST.replace('typedef unsigned long gsize;', 'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+        source = host + r'''
+struct Object { int value; int get(int amount) const { return value+amount; } };
+int Object::*data_member=&Object::value;
+int (Object::*function_member)(int) const=&Object::get;
+template<class> struct IsMember { enum {value=0}; };
+template<class R,class C>struct IsMember<R C::*> {enum {value=1};};
+template<class T>T* address(const T&&)=delete;
+enum Mode { VALUE=7 };
+typedef __underlying_type(Mode) ModeType;
+struct Operator { int operator&() const {return 9;} };
+static const char *ordinary_name(void){return "FridaStdCpp";}
+int main(void){
+  Object o={3}; Operator op;
+  require(o.*data_member==3 && (o.*function_member)(4)==7);
+  require(IsMember<decltype(data_member)>::value==1);
+  require(op.operator&()==9 && sizeof(ModeType)==sizeof(Mode));
+  require(strcmp(ordinary_name(),EXPECTED)==0);
+  return 0;
+}
+'''
+        source = source.replace('EXPECTED', c_string('FridaStdCpp'))
+        output, report = self.transform(source, 'cpp')
+        self.assertEqual(report['skipped'], [])
+        self.assertEqual(report['summary']['heap_buffers'], 1)
+        self.assertIn(b'Object::*data_member', output)
+        self.assertIn(b'Object::*function_member', output)
+        self.assertIn(b'=delete;', output)
+        self.assertIn(b'op.operator&()==9', output)
+        self.compile_run(output, 'cpp')
+
+    def test_real_ndk_libcpp_type_traits_preprocess_and_original_token_compile(self):
+        clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
+        if not clang:
+            if os.environ.get('STRING_OUTLINE_REQUIRE_ANDROID') == '1':
+                self.fail('set STRING_OUTLINE_ANDROID_CLANG to the installed NDK clang')
+            self.skipTest('installed Android NDK clang not selected')
+        source = r'''#include <type_traits>
+typedef unsigned long gsize;
+void *g_malloc(gsize);
+int g_once_init_enter(volatile gsize *);
+void g_once_init_leave(volatile gsize *,gsize);
+struct Object { int value; int get(int n) const {return value+n;} };
+template<class T>T* deleted_address(const T&&)=delete;
+static_assert(std::is_member_pointer<int Object::*>::value,"member type");
+static_assert(std::is_member_function_pointer<int(Object::*)(int)const>::value,"method type");
+const char *name(void){return "FridaLibCpp";}
+int run(void){Object o={3}; auto member=&Object::get; return (o.*member)(4);}
+'''
+        with tempfile.TemporaryDirectory(prefix='nso-libcpp-') as directory:
+            root = Path(directory)
+            raw, unit, obj = root/'unit.cpp', root/'unit.ii', root/'unit.o'
+            raw.write_text(source, encoding='utf-8')
+            command = [clang, '--target=aarch64-linux-android21', '-std=gnu++11', '-E', '-P', str(raw), '-o', str(unit)]
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+            original = unit.read_bytes()
+            output, report = self.transform(original, 'cpp')
+            self.assertTrue(report['ok'])
+            self.assertGreater(report['parser_normalization']['kind_counts']['member-pointer'], 0)
+            self.assertGreater(report['parser_normalization']['kind_counts']['deleted-function'], 0)
+            self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+            self.assertIn(b'T* deleted_address(const T&&)=delete;', output)
+            self.assertIn(b'int(Object::*)(int)const', output)
+            unit.write_bytes(output)
+            command = [clang, '--target=aarch64-linux-android21', '-std=gnu++11', '-x', 'c++-cpp-output', '-c', str(unit), '-o', str(obj), '-Oz', '-fPIC']
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+            self.assertEqual(obj.read_bytes()[:4], b'\x7fELF')
+
+    def test_real_android_ndk_headers_preprocess_and_compile_c_and_cpp(self):
+        clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
+        if not clang:
+            if os.environ.get('STRING_OUTLINE_REQUIRE_ANDROID') == '1':
+                self.fail('set STRING_OUTLINE_ANDROID_CLANG to the installed NDK clang')
+            self.skipTest('installed Android NDK clang not selected')
+        source = r'''#define _GNU_SOURCE 1
+#include <linux/types.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <jni.h>
+typedef unsigned long gsize;
+void *g_malloc(gsize);
+int g_once_init_enter(volatile gsize *);
+void g_once_init_leave(volatile gsize *,gsize);
+typedef __signed__ __int128 AndroidSigned128;
+enum AndroidCompat { OLD __attribute__((deprecated))=1, CURRENT=2 };
+extern int alias_api(void) __asm__("android_alias_api");
+struct Value { int number; const char *name; };
+static const struct Value metadata[]={ {1,"FridaAndroidMetadata"} };
+const char * _Nullable name(const void * _Nonnull arg) {
+  __typeof__(*(const char **)arg) label=0;
+  (void)label;
+  return "frida:rpc";
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='nso-ndk-') as directory:
+            root = Path(directory)
+            raw = root/'unit.c'
+            raw.write_text(source, encoding='utf-8')
+            for language in ('c', 'cpp'):
+                with self.subTest(language=language):
+                    unit = root/('unit.i' if language == 'c' else 'unit.ii')
+                    standard = '-std=gnu11' if language == 'c' else '-std=gnu++11'
+                    preprocess = [clang, '--target=aarch64-linux-android21', standard, '-x', 'c' if language == 'c' else 'c++', '-E', '-P', str(raw), '-o', str(unit)]
+                    result = subprocess.run(preprocess, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                    original = unit.read_bytes()
+                    output, report = self.transform(original, language)
+                    self.assertTrue(report['ok'])
+                    self.assertEqual(report['summary']['static_objects'], 1)
+                    self.assertEqual(report['summary']['literal_occurrences_transformed'], 2)
+                    self.assertIn(b'typedef __signed__ __int128 AndroidSigned128;', output)
+                    self.assertIn(b'_Nullable', output)
+                    self.assertIn(b'__typeof__', output)
+                    self.assertIn(b'__asm__("android_alias_api")', output)
+                    unit.write_bytes(output)
+                    obj = root/(language+'.o')
+                    command = [clang, '--target=aarch64-linux-android21', standard, '-x', 'cpp-output' if language == 'c' else 'c++-cpp-output', '-c', str(unit), '-o', str(obj), '-Oz', '-fPIC']
+                    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                    self.assertEqual(obj.read_bytes()[:4], b'\x7fELF')
+
+
+class CppHeaderOriginBoundaryTests(unittest.TestCase):
+    """Explicit physical header roots hide parser input, never compiler output."""
+
+    def compile_run(self, source, language='cpp', extra_flags=(), execute=True):
+        # GCC's preprocessed-input mode accepts numeric compiler line markers,
+        # whereas these fixtures deliberately retain standard #line directives.
+        # Use the native source language with no macros/includes added; the
+        # Android product path is separately tested with Clang c++-cpp-output.
+        return OutlineTests.compile_run(self, source, language, extra_flags,
+                                        execute, input_language='c++')
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='nso-cpp-origin-')
+        self.addCleanup(temporary.cleanup)
+        self.workspace = Path(temporary.name).resolve()
+        self.header_root = self.workspace / 'external' / 'include' / 'c++' / 'v1'
+        self.header_root.mkdir(parents=True)
+        self.owned_path = self.workspace / 'owned.cpp'
+        self.owned_path.write_bytes(b'/* physical owned translation unit */\n')
+        self.header_count = 0
+        size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+        self.host = GLIB_HOST.replace('typedef unsigned long gsize;',
+                                      'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+
+    @staticmethod
+    def canonical(path):
+        return os.path.normcase(str(Path(path).resolve())).replace('\\', '/')
+
+    @staticmethod
+    def line_marker(path, line=1, gnu=False):
+        # Compiler filenames escape backslashes and encode non-ASCII UTF-8 bytes
+        # as octal; they are not Python/JSON escapes or synthetic include roots.
+        spelling = ''.join('\\%03o' % byte if byte >= 128 else
+                           '\\\\' if byte == 92 else '\\"' if byte == 34 else chr(byte)
+                           for byte in str(path).encode('utf-8'))
+        return ('# %d "%s" 1 3\n' if gnu else '#line %d "%s"\n') % (line, spelling)
+
+    def owned(self, body):
+        if isinstance(body, str):
+            body = body.encode('utf-8')
+        return self.line_marker(self.owned_path).encode('ascii') + body
+
+    def header(self, body, name=None, root=None, gnu=False):
+        if isinstance(body, str):
+            body = body.encode('utf-8')
+        self.header_count += 1
+        path = (self.header_root if root is None else root) / (name or 'header-%d.hpp' % self.header_count)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        return self.line_marker(path, line=7, gnu=gnu).encode('ascii') + body, path
+
+    def transform(self, source, roots=None, language='cpp'):
+        return outline.outline_source(source, language, str(self.owned_path),
+                                      cpp_opaque_roots=(self.header_root,) if roots is None else roots)
+
+    def assert_failure(self, source, reason, roots=None, language='cpp'):
+        with self.assertRaises(outline.OutlineError) as caught:
+            self.transform(source, roots=roots, language=language)
+        report = caught.exception.report
+        self.assertFalse(report['ok'])
+        expected = (reason,) if isinstance(reason, str) else reason
+        self.assertIn(report['failures'][-1]['reason'], expected, report['failures'])
+        return report
+
+    def assert_exact_header(self, header, source, output):
+        self.assertIn(header, output)
+        self.assertEqual(output.count(header), source.count(header))
+
+    def test_compiler_escaped_utf8_origins_use_physical_temporary_roots(self):
+        for gnu in (False, True):
+            with self.subTest(gnu_marker=gnu):
+                body = b'static const char *header_name="FridaHeaderUtf8";\n'
+                header, path = self.header(body, name='\u5b50\u76ee\u5f55/\u5916\u90e8-Frida.hpp', gnu=gnu)
+                source = self.owned(self.host) + header + self.owned(
+                    'const char *name(void){return "FridaOwnedUtf8";}\n')
+                output, report = self.transform(source)
+                self.assertTrue(self.header_root.is_dir())
+                self.assertTrue(path.is_file())
+                self.assertIn(b'\\345', header.splitlines()[0])
+                if os.name == 'nt':
+                    self.assertIn(b'\\\\', header.splitlines()[0])
+                self.assertEqual(report['cpp_header_boundary']['roots'], [self.canonical(self.header_root)])
+                self.assertEqual(report['cpp_header_boundary']['opaque_bytes'], len(body))
+                self.assertTrue(report['cpp_header_boundary']['original_bytes_emitted'])
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                self.assertNotIn(b'"FridaOwnedUtf8"', output)
+                skipped = next(s for s in report['skipped'] if s['reason'] == 'skipped_header_origin')
+                self.assertIn(self.canonical(path), skipped['detail'])
+                self.assert_exact_header(header, source, output)
+
+    def test_consecutive_opaque_blocks_balance_namespace_and_extern_c(self):
+        other_root = self.workspace / 'external' / 'alternate' / 'include'
+        first, first_path = self.header('namespace sdk {\nextern "C" {\n')
+        middle, middle_path = self.header(
+            'int header_api(const char *);\nstatic const char *header_name="FridaConsecutiveHeader";\n',
+            root=other_root, gnu=True)
+        last, last_path = self.header('}\n}\n')
+        headers = first + middle + last
+        source = self.owned(self.host) + headers + self.owned(
+            'const char *name(void){return "FridaConsecutiveOwned";}\n')
+        transformer = outline.Transformer(source, 'cpp', str(self.owned_path), (self.header_root, other_root))
+        self.assertFalse(transformer.root.has_error)
+        output, report = transformer.run()
+        self.assertEqual(report['cpp_header_boundary']['balanced_regions'], 1)
+        self.assertEqual(transformer.shadow.origins.ranges[0]['origins'],
+                         sorted(self.canonical(p) for p in (first_path, middle_path, last_path)))
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assertEqual(report['summary']['unsupported_marker_total'], 1)
+        self.assert_exact_header(headers, source, output)
+
+    def test_owned_extern_c_shell_and_namespace_survive_host_execution(self):
+        header, _ = self.header('extern "C" {\nint header_api(void);\n}\n')
+        declarations = ('static const char *slot="FridaOwnedSlot";\n'
+                        'const char *origin_name(void){return "FridaOwnedLinkage";}\n')
+        source = self.owned(self.host + '\nnamespace owned {\nextern "C" {\n') + header
+        source += self.owned(declarations + '}\n}\n' + '''int main(void) {
+ require(strcmp(owned::slot,%s)==0);
+ require(strcmp(owned::origin_name(),%s)==0);
+ require(owned::origin_name()==owned::origin_name());
+ return 0;
+}
+''' % (c_string('FridaOwnedSlot'), c_string('FridaOwnedLinkage')))
+        output, report = self.transform(source)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['skipped'], [])
+        self.assertEqual(report['summary']['heap_buffers'], 2)
+        self.assertEqual(report['static_objects'][0]['name'], '::owned::slot')
+        self.assertIn(b'namespace owned {\nextern "C" {\n', output)
+        self.assert_exact_header(header, source, output)
+        self.compile_run(output, 'cpp')
+
+    def test_header_bytes_are_emitted_exactly_and_owned_marker_converts(self):
+        body = (b'// Frida comment: __signed__ _Nullable\r\n' +
+                '/* \u5916\u90e8\u5b57\u8282\u4e0d\u5f97\u6539\u5199 */\r\n'.encode('utf-8') +
+                b'namespace header_only {\r\n'
+                b'static const char *label=R"tag(frida:opaque)tag";\r\n'
+                b'static const unsigned char gumjs_header_source_map[]={70,114,105,100,97,0};\r\n'
+                b'}\r\n')
+        header, _ = self.header(body)
+        source = self.owned(self.host) + header + self.owned(
+            'const char *name(void){return "FridaOwnedBytes";}\n')
+        transformer = outline.Transformer(source, 'cpp', str(self.owned_path), (self.header_root,))
+        self.assertEqual(len(transformer.shadow.view), len(source))
+        self.assertEqual([i for i, byte in enumerate(source) if byte in (10, 13)],
+                         [i for i, byte in enumerate(transformer.shadow.view) if byte in (10, 13)])
+        output, report = transformer.run()
+        self.assert_exact_header(header, source, output)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assertEqual(report['summary']['resources_transformed'], 0)
+        self.assertNotIn(b'"FridaOwnedBytes"', output)
+
+    def test_skipped_header_origin_reports_marker_and_resource_offsets(self):
+        marker = b'"Fri" "daHeaderMarker"'
+        resource = b'gumjs_header_bytecode'
+        header, path = self.header(b'static const char *label=' + marker + b';\n'
+                                   b'static const unsigned char ' + resource + b'[]={70,114,105,100,97};\n')
+        owned_marker = b'"FridaOwnedReport"'
+        source = self.owned(self.host) + header + self.owned(
+            b'const char *name(void){return ' + owned_marker + b';}\n')
+        output, report = self.transform(source)
+        skipped = [s for s in report['skipped'] if s['reason'] == 'skipped_header_origin']
+        self.assertEqual({s['kind'] for s in skipped}, {'string', 'numeric-resource'})
+        self.assertEqual({source[s['start_byte']:s['end_byte']] for s in skipped}, {marker, resource})
+        for item in skipped:
+            self.assertEqual(item['line'], source.count(b'\n', 0, item['start_byte']) + 1)
+            self.assertEqual(item['column'], item['start_byte'] - source.rfind(b'\n', 0, item['start_byte']))
+            self.assertIn(self.canonical(path), item['detail'])
+        self.assertEqual(report['summary']['unsupported_reason_counts']['skipped_header_origin'], 2)
+        self.assertEqual(report['summary']['unsupported_marker_total'], 1)
+        self.assertEqual(report['summary']['unsupported_resource_total'], 1)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        occurrence = next(o for o in report['occurrences'] if o['kind'] == 'string')
+        self.assertEqual(source[occurrence['start_byte']:occurrence['end_byte']], owned_marker)
+        self.assert_exact_header(header, source, output)
+
+    def test_unknown_external_types_static_slots_are_conservative(self):
+        header, _ = self.header('typedef const char *ExternalText;\n'
+                                'struct ExternalRecord {const char *name;};\n')
+        unknown = ('static ExternalText text="FridaExternalText";\n'
+                   'static const ExternalRecord record={"FridaExternalRecord"};\n')
+        source = self.owned(self.host) + header + self.owned(unknown +
+            'static const char *known="FridaKnownSlot";\n'
+            'const char *name(void){return "FridaKnownReturn";}\n')
+        output, report = self.transform(source)
+        self.assertIn(unknown.encode(), output)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 2)
+        self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+        self.assertEqual([obj['name'] for obj in report['static_objects']], ['::known'])
+        self.assertEqual({source[s['start_byte']:s['end_byte']] for s in report['skipped']},
+                         {b'"FridaExternalText"', b'"FridaExternalRecord"'})
+        self.assertTrue(all(s['reason'] for s in report['skipped']))
+        self.assertNotIn(b'::text =', output)
+        self.assertNotIn(b'::record.name =', output)
+
+    def test_shadowed_external_typedef_and_external_static_consumers_do_not_patch(self):
+        cases = (
+            ('shadowed-typedef', self.host + 'typedef const char *Text;\n',
+             'namespace N {typedef const char *const Text;}\n',
+             'namespace N {static Text slot="frida-slot";}\n', b'"frida-slot"', '::N::slot'),
+            ('external-consumer', self.host + 'static const char *slot="FridaExternalConsumer";\n',
+             'static const char *saved=slot;\n', '', b'"FridaExternalConsumer"', '::slot'),
+        )
+        for name, before, external, after, marker, slot in cases:
+            with self.subTest(case=name):
+                header, _ = self.header(external)
+                source = self.owned(before) + header + self.owned(after +
+                    'const char *safe(void){return "FridaStillOwned";}\n')
+                output, report = self.transform(source)
+                self.assertIn(marker, output)
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                self.assertEqual(report['summary']['expected_pointer_patches'], 0)
+                self.assertEqual(report['static_objects'], [])
+                self.assertNotIn((slot + ' =').encode(), output)
+                self.assertTrue(any(source[s['start_byte']:s['end_byte']] == marker and s['reason']
+                                    for s in report['skipped']), report['skipped'])
+                self.assert_exact_header(header, source, output)
+
+    def test_external_resource_reference_skips_whole_resource(self):
+        declaration = b'static const unsigned char gumjs_owned_bytecode[]={0,70,114,105,100,97,255};\n'
+        reference = b'const unsigned char *resource(void){return gumjs_owned_bytecode;}\n'
+        header, _ = self.header('inline const unsigned char *header_resource(void){return gumjs_owned_bytecode;}\n')
+        source = self.owned(self.host.encode() + declaration) + header + self.owned(reference +
+            b'const char *safe(void){return "FridaOwnedAfterResource";}\n')
+        output, report = self.transform(source)
+        self.assertIn(declaration, output)
+        self.assertIn(reference, output)
+        self.assert_exact_header(header, source, output)
+        self.assertEqual(report['summary']['resources_transformed'], 0)
+        self.assertFalse(any(e['kind'] == 'numeric-resource' for e in report['entries']))
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assertTrue(any(s['kind'] == 'numeric-resource' and s['reason'] == 'resource_reference_header_origin'
+                            for s in report['skipped']), report['skipped'])
+
+    def test_header_cannot_close_or_replace_owned_scope(self):
+        for owned_scope, replacement in (('namespace owned {\n', '}\nnamespace replacement {\n'),
+                                         ('extern "C" {\n', '}\nextern "C" {\n')):
+            with self.subTest(scope=owned_scope):
+                header, _ = self.header(replacement)
+                source = self.owned(self.host + owned_scope) + header + self.owned('}\n')
+                self.assert_failure(source, 'cpp_opaque_cross_origin_delimiter')
+
+    def test_header_cannot_enter_owned_declaration_or_non_shell_scope(self):
+        cases = (
+            ('struct-field', 'struct S {\n', 'const char *hidden;\n',
+             'const char *shown;\n};\nstatic const S value={"frida-hidden","plain"};\n'),
+            ('enum-value', 'enum E {\n', 'HIDDEN=1,\n', 'SHOWN=2\n};\n'),
+            ('function-body', 'const char *name(void){\n', 'const char *p="FridaHeaderLocal";\n',
+             'return "FridaOwnedReturn";\n}\n'),
+            ('initializer', 'static const char *names[]={\n', '"FridaHeaderElement",\n',
+             '"FridaOwnedElement"\n};\n'),
+        )
+        for name, before, external, after in cases:
+            with self.subTest(scope=name):
+                header, _ = self.header(external)
+                source = self.owned(self.host + before) + header + self.owned(after)
+                self.assert_failure(source, ('cpp_opaque_cross_origin_declaration',
+                                             'cpp_opaque_unsupported_owned_scope'))
+        header, _ = self.header('namespace external {\n')
+        source = self.owned(self.host) + header + self.owned(
+            'const char *name(void){return "FridaCrossedNamespace";}\n}\n')
+        self.assert_failure(source, 'cpp_opaque_cross_origin_delimiter')
+
+    def test_header_cannot_cross_into_owned_declaration_without_delimiters(self):
+        cases = (
+            ('header-initializer', '', 'static const char *external=\n', '"FridaOwnedInitializer";\n'),
+            ('owned-initializer', 'static const char *owned_slot=\n', '"FridaHeaderInitializer";\n',
+             'const char *name(void){return "FridaOwnedAfter";}\n'),
+            ('header-type', '', 'extern int\n', 'owned_value;\n'),
+            ('owned-return-type', 'const char *\n', 'header_function(void);\n',
+             'const char *name(void){return "FridaOwnedAfter";}\n'),
+        )
+        for name, before, external, after in cases:
+            with self.subTest(case=name):
+                header, _ = self.header(external)
+                source = self.owned(self.host + before) + header + self.owned(after)
+                self.assert_failure(source, 'cpp_opaque_cross_origin_declaration')
+
+    def test_roots_require_real_narrow_physical_directories(self):
+        not_directory = self.workspace / 'not-a-directory.hpp'
+        not_directory.write_bytes(b'int value;\n')
+        cases = ((self.header_root / 'missing', 'cpp_opaque_root_not_physical_directory'),
+                 (not_directory, 'cpp_opaque_root_not_physical_directory'),
+                 (Path('external/include'), 'cpp_opaque_root_not_physical_directory'),
+                 (Path('<system-headers>'), 'cpp_opaque_root_not_physical_directory'),
+                 (Path(self.workspace.anchor), 'cpp_opaque_root_too_broad'))
+        source = self.owned(self.host + 'const char *name(void){return "FridaPhysicalRoots";}\n')
+        for root, reason in cases:
+            with self.subTest(root=str(root)):
+                self.assert_failure(source, reason, roots=(root,))
+
+    def test_explicit_roots_require_line_markers(self):
+        source = (self.host + 'const char *name(void){return "FridaNoLineMarkers";}\n').encode()
+        self.assert_failure(source, 'cpp_opaque_requires_line_markers')
+
+    def test_nonphysical_and_nearby_origins_remain_owned_full_ast(self):
+        bad = b'static_assert(__is_same(int, int), "header grammar");\n'
+        sibling = self.header_root.parent / 'v1-other' / 'traits.hpp'
+        sibling.parent.mkdir()
+        sibling.write_bytes(bad)
+        owned_header = self.workspace / 'owned-traits.hpp'
+        owned_header.write_bytes(bad)
+        origins = ('v1/traits.hpp', '<built-in>', '<nianchu-outline-generated>', sibling, owned_header)
+        for origin in origins:
+            with self.subTest(origin=str(origin)):
+                source = self.owned(self.host) + self.line_marker(origin).encode('ascii') + bad
+                source += self.owned('const char *name(void){return "FridaUnapprovedOrigin";}\n')
+                self.assert_failure(source, 'input_does_not_parse')
+
+    def test_c_policy_is_rejected_before_header_masking(self):
+        header, _ = self.header('int header_declaration;\n')
+        source = self.owned(GLIB_HOST) + header + self.owned(
+            'const char *name(void){return "FridaCPolicy";}\n')
+        self.assert_failure(source, 'cpp_opaque_policy_requires_cpp', language='c')
+
+    def test_no_roots_full_ast_fails_closed_on_same_header_syntax(self):
+        bad = b'static_assert(__is_same(int, int), "header grammar");\n'
+        header, _ = self.header(bad)
+        source = self.owned(self.host) + header + self.owned(
+            'const char *name(void){return "FridaFullAst";}\n')
+        with self.subTest(policy='no-roots'):
+            report = self.assert_failure(source, 'input_does_not_parse', roots=())
+            self.assertNotIn('cpp_header_boundary', report)
+        with self.subTest(policy='explicit-physical-root'):
+            output, report = self.transform(source)
+            self.assertTrue(report['ok'])
+            self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+            self.assert_exact_header(header, source, output)
+        with self.subTest(policy='same-syntax-owned'):
+            source = self.owned(self.host.encode() + bad) + header
+            self.assert_failure(source, 'input_does_not_parse')
+
+    def test_unknown_and_layout_pragmas_in_headers_are_rejected(self):
+        directives = ('#pragma pack(push,1)\n',
+                      '#pragma clang attribute push (__attribute__((packed)), apply_to=record)\n',
+                      '#pragma message("frida")\n', '#pragma unknown_vendor layout\n',
+                      '#define HEADER_NAME "frida"\n')
+        for directive in directives:
+            with self.subTest(directive=directive):
+                header, _ = self.header(directive + 'int header_declaration;\n')
+                source = self.owned(self.host) + header + self.owned(
+                    'const char *name(void){return "FridaRejectedPragma";}\n')
+                self.assert_failure(source, 'input_not_fully_preprocessed')
+
+    def test_header_diagnostic_pragmas_preserve_bytes_and_owned_transform(self):
+        body = ('#pragma clang diagnostic push\n'
+                '#pragma clang diagnostic ignored "-Wdeprecated-declarations"\n'
+                '#pragma once\n#pragma GCC system_header\n'
+                'static_assert(__is_same(int, int), "header grammar");\n'
+                '#pragma clang diagnostic pop\n')
+        header, _ = self.header(body)
+        source = self.owned(self.host) + header + self.owned(
+            'const char *name(void){return "FridaDiagnosticPragma";}\n')
+        output, report = self.transform(source)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assert_exact_header(header, source, output)
+
+    def test_synthetic_generated_helpers_are_owned_and_validated(self):
+        header, _ = self.header('namespace trailing_header {\nint external;\n}\n')
+        source = self.owned(self.host +
+            'static const char *name(void){return "FridaGeneratedOwned";}\n' +
+            'int main(void){require(strcmp(name(),%s)==0);return 0;}\n' % c_string('FridaGeneratedOwned')) + header
+        output, report = self.transform(source)
+        synthetic = b'#line 1 "<nianchu-outline-generated>"\n'
+        self.assertTrue(output.startswith(synthetic))
+        self.assertEqual(output.count(synthetic), 2)
+        self.assert_exact_header(header, source, output)
+        generated = outline.Transformer(output, 'cpp', str(self.owned_path), (self.header_root,))
+        self.assertFalse(generated.root.has_error)
+        getters = {entry['getter'] for entry in report['entries']}
+        parsed_functions = {generated.text(node.child_by_field_name('declarator'))
+                            for node in generated.nodes if node.type == 'function_definition'}
+        for getter in getters:
+            self.assertTrue(any(getter in declaration for declaration in parsed_functions), getter)
+            start = output.index(('static const char * ' + getter + ' (void)\n{').encode())
+            self.assertFalse(any(block['opaque'] and block['start'] <= start < block['end']
+                                 for block in generated.shadow.origins.blocks))
+        self.assertEqual(generated.shadow.origins.summary()['opaque_bytes'],
+                         report['cpp_header_boundary']['opaque_bytes'] + 1)
+        self.assertIn(header + b'\n' + synthetic, output)
+        self.compile_run(output, 'cpp')
+        original_runtime = outline.Transformer.runtime
+        malformed = b'\nstatic void malformed_helper(void) { int = ; }\n'
+        for location in ('prelude', 'suffix'):
+            with self.subTest(corrupt=location):
+                def corrupt_runtime(transformer, objects):
+                    prelude, suffix = original_runtime(transformer, objects)
+                    return (prelude + malformed, suffix) if location == 'prelude' else (prelude, suffix + malformed)
+                with mock.patch.object(outline.Transformer, 'runtime', new=corrupt_runtime):
+                    self.assert_failure(source, 'generated_source_does_not_parse')
+
+    def test_hidden_same_name_overloads_skip_literals_and_whole_resources(self):
+        external = ('namespace N {\nint pick(const char (&)[6]);\n'
+                    'int pick(const unsigned char (&)[5]);\nint pick(const void *);\n}\n')
+        resource = b'static const unsigned char gumjs_overload_bytecode[]={70,114,105,100,97};\n'
+        cases = (('literal', b'', b'pick("frida")', 'cpp_header_origin_call_parameter'),
+                 ('resource', resource, b'pick(gumjs_overload_bytecode)',
+                  'resource_reference_cpp_header_origin_call_parameter'))
+        for name, declaration, call, reason in cases:
+            with self.subTest(argument=name):
+                header, _ = self.header(external)
+                source = self.owned((self.host + 'int pick(const char *);\n').encode() + declaration) + header
+                source += self.owned(b'namespace N {int run(void){return ' + call + b';}}\n'
+                                     b'const char *safe(void){return "FridaOverloadSafe";}\n')
+                output, report = self.transform(source)
+                self.assertIn(call, output)
+                self.assert_exact_header(header, source, output)
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                self.assertEqual(report['summary']['resources_transformed'], 0)
+                self.assertTrue(any(s['reason'] == reason for s in report['skipped']), report['skipped'])
+                if declaration:
+                    self.assertIn(declaration, output)
+                    self.assertFalse(any(e['kind'] == 'numeric-resource' for e in report['entries']))
+                else:
+                    self.assertIn(b'"frida"', output)
 
 
 if __name__ == '__main__':

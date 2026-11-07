@@ -52,9 +52,9 @@ python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录
 
 `patches/rename.py` 使用固定 LIEF **0.17.6** 和 schema 4 报告，保留已有内部标识和 raw Agent 清理规则。私有 `StopReason` 注册名为 `NianchuAgentStopReason`，枚举数值、value_name/nick 不变；raw Agent 从 Meson 生成 `libnianchu-agent-raw.so`，最后一次 LIEF 写出后只清除确认无动态字段、符号或版本引用的完整旧名。GNU/SysV hash 和 arm64/arm32 内嵌 Agent 的入口、实际 SONAME、新类型正向锚点、旧 raw 子串归零仍强制核验。
 
-新增 `scripts/outline_elf_strings.py` 在编译前处理预处理 C/C++。原功能字符串和指定 gumjs 数字资源存为编码字节，通过长期 heap 缓存恢复；AST 指定静态表字段、资源引用和函数名，保留公共查询键、wire/API、enum name/nick、source_tag 以及原资源字节、长度和 `sizeof`。不安全上下文保留并报告具体原因。两版 Android `releng/env_android.py` 的 Meson compiler 数组使用外置 Python `-I` wrapper，兼容 arm32 同样接入；精确 parser pins、工具 SHA、原 source SHA/mode、原依赖及 target/sysroot 都核验。最终输入使用 `cpp-output`／`c++-cpp-output`，避免 forced header 二次展开。
+新增 `scripts/outline_elf_strings.py` 在编译前处理预处理 C/C++。原功能字符串和指定 gumjs 数字资源存为编码字节，通过长期 heap 缓存恢复；AST 指定静态表字段、资源引用和函数名，保留公共查询键、wire/API、enum name/nick、source_tag 以及原资源字节、长度和 `sizeof`。不安全上下文保留并报告具体原因。GNU/Clang 扩展使用等长解析视图定位，原编译输入保留真实 token；被遮罩的属性和未知类型仍参与写入安全判定。C 使用 `-E -P`，C++ 使用 `-E` 保留 `#line` 来源，仅具体 libc++／V8／Highway 头根建立 opaque AST 视图；原外部头仍完整编译，自有 core/gum、GLib 和 NDK C 头继续解析，外部头内标记与资源明确报告。来源切换要求完整声明边界和顶层／namespace／extern C 作用域；外部同名类型、重载和静态变量引用按未知处理。wrapper `1.1` 强制来源策略与根重叠检查，旧 prepare 配置拒绝复用。两版 Android `releng/env_android.py` 的 Meson compiler 数组使用外置 Python `-I` wrapper，兼容 arm32 同样接入；精确 parser pins、工具 SHA、原 source SHA/mode、原依赖及 target/sysroot 都核验。最终输入使用 `cpp-output`／`c++-cpp-output`，避免 forced header 二次展开。
 
-schema 4 重新枚举最终全部可读 PT_LOAD 的 `p_filesz`：ASCII 0x20–0x7e、每片最多 256 字节、大小写不敏感匹配 `frida`、每个 callback 计一次。每份 Agent/Gadget 必须少于 21 次，server 内嵌两架构分别检查；旧 schema 3 拒绝复用。普通 `Friday` 与原缓存 SDK 残留列入预算，原功能值不得靠逐串改 QuickJS bytecode 消除。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。host 契约与磁盘计数不替代 Android JS/Java、GC、异常和宿主业务运行验证。
+schema 4 重新枚举最终全部可读 PT_LOAD 的 `p_filesz`：ASCII 0x20–0x7e、每片最多 256 字节、大小写不敏感匹配 `frida`、每个 callback 计一次。每份 Agent/Gadget 必须有非零扫描字节和 printable callbacks，匹配回调允许为零且必须少于 21 次，server 内嵌两架构分别检查；旧 schema 3 拒绝复用。普通 `Friday` 与原缓存 SDK 残留列入预算，原功能值不得靠逐串改 QuickJS bytecode 消除。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。host 契约与磁盘计数不替代 Android JS/Java、GC、异常和宿主业务运行验证。
 
 ## Java bridge 源码实验
 
@@ -109,7 +109,7 @@ python -I -B scripts/apply_dependency_profile.py --component releng --version 16
 
 ## KPM 边界
 
-内核工程位于工作目录独立的 `nianchu-ptrace-kpm`。按用户最新要求，`nianchu-ptrace 1.1.1` 正在加入当前读取者或调用者 `UID > 10000` 门槛，maps、TracerPid 和 TRACEME 统一适用；UID 10000、root、shell 保留原行为，没有特定 App UID 名单或被读目标 PID/UID 过滤。maps 精确将 `/memfd:nianchu-cache` 显示为 `/nianchu-cache`，保留 deleted 后缀、数字字段与真实 VMA/vm_file；`maps=on/off` 可控。已核对 xiaojiahide、pandahide 的调用局部 count 快照和新增输出处理方式。KPM 编译和 Unicorn 测试、手机文件推送、实际内核 ABI 与加载验证分别记录。
+内核工程位于工作目录独立的 `nianchu-ptrace-kpm`。按用户最新要求，`nianchu-ptrace 1.1.1` 已加入当前读取者或调用者 `UID > 10000` 门槛，maps、TracerPid 和 TRACEME 统一适用；UID 10000、root、shell 保留原行为，没有特定 App UID 名单或被读目标 PID/UID 过滤。maps 精确将 `/memfd:nianchu-cache` 显示为 `/nianchu-cache`，保留 deleted 后缀、数字字段与真实 VMA/vm_file；`maps=on/off` 可控。已核对 xiaojiahide、pandahide 的调用局部 count 快照和新增输出处理方式。1.1.1 固定工具链编译和三组 Unicorn ARM64 测试通过，手机文件推送与实际内核 ABI、加载验证分别记录。
 
 手机交付使用四个简名 `server16`、`server17`、`zygisk_gadget16.zip`、`zygisk_gadget17.zip`，以及独立 KPM 文件；Zygisk 安装、KPM 加载、手机重启与 system_server 注入不随文件推送执行。
 
