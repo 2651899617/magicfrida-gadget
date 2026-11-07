@@ -216,6 +216,8 @@ frida_on_load (void)
 \t\t\t}
 \t\t}'''
                 optional['gadget-json-config'] = [edit(old, new)]
+            elif relative.endswith('lib/agent/meson.build'):
+                changes = [edit("shared_library('frida-agent-raw',", "shared_library('nianchu-agent-raw',")]
             elif relative.endswith('lib/gadget/meson.build'):
                 changes = [edit("shared_library('frida-gadget-raw',", "shared_library('nianchu-gadget-raw',"),
                            edit("vala_header: 'frida-gadget.h'", "vala_header: 'nianchu-gadget.h'"),

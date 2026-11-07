@@ -65,8 +65,11 @@ DIAGNOSTIC_STRINGS = (
 TYPE_MAP = {name: 'Nnchu' + name[5:] for name in INTERNAL_TYPES}
 DIAGNOSTIC_MAP = {name: 'nnchu' + name[5:] for name in DIAGNOSTIC_STRINGS}
 SOURCE_TYPE_MAP = {'FridaAgentStopReason': 'NianchuAgentStopReason'}
-REPORT_SCHEMA = 2
-REPORT_PROFILE = 'nianchu-functional-identifiers-v2'
+REPORT_SCHEMA = 3
+REPORT_PROFILE = 'nianchu-functional-identifiers-v3'
+RAW_AGENT_OLD = 'libfrida-agent-raw.so'
+RAW_AGENT_NEW = 'libnianchu-agent-raw.so'
+RAW_AGENT_SIGNATURE = 'frida-agent-raw.so'
 CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 LIEF_VERSION = '0.17.6'
 KINDS = ('agent', 'helper', 'server', 'gadget')
@@ -373,6 +376,159 @@ def string_occurrences(data, token, section_name='.rodata', layout=None, protect
     return result
 
 
+def dynamic_entries(data, layout):
+    entries = []
+    stride = 16 if layout.bits == 64 else 8
+    for segment in layout.programs:
+        if segment[0] != 2:
+            continue
+        if segment[5] % stride:
+            raise ValueError('invalid PT_DYNAMIC size')
+        for position in range(segment[2], segment[2] + segment[5], stride):
+            tag, value = struct.unpack_from('<qQ' if layout.bits == 64 else '<iI', data, position)
+            entries.append((position, tag, value))
+            if tag == 0:
+                break
+        else:
+            raise ValueError('unterminated PT_DYNAMIC')
+    return entries
+
+
+def dynstr_references(data, layout=None):
+    """Bound all known ELF consumers, including suffix references and versions."""
+    layout = layout or Layout(data)
+    strings = layout.by_name.get('.dynstr')
+    if strings is None:
+        return {'dynamic': [], 'references': [], 'sonames': []}
+    if strings[1] != 3:
+        raise ValueError('invalid dynamic string table')
+    dynamic = dynamic_entries(data, layout)
+    references = []
+
+    def add(index, scope, field):
+        value = layout.string(strings, index)
+        begin = strings[4] + index
+        references.append({'index': index, 'value': value, 'scope': scope,
+                           'field': field, 'begin': begin,
+                           'end': begin + len(value.encode('utf-8', errors='surrogateescape')) + 1})
+
+    string_tags = {1, 14, 15, 29, 0x6ffffefa, 0x6ffffefb, 0x6ffffefc,
+                   0x7ffffffd, 0x7ffffffe, 0x7fffffff}
+    for position, tag, value in dynamic:
+        if tag in string_tags:
+            add(value, 'dynamic:' + hex(tag), position)
+    for section in layout.sections:
+        if not section[6] or layout.sections[section[6]] != strings:
+            continue
+        if section[1] in (2, 11):
+            stride = 24 if layout.bits == 64 else 16
+            for position in range(section[4], section[4] + section[5], stride):
+                add(layout.u32(position), 'symbol', position)
+        elif section[1] == 6:
+            # PT_DYNAMIC above is the loader's active source of dynamic tags.
+            if not any(p[0] == 2 and p[2] == section[4] and p[5] == section[5]
+                       for p in layout.programs):
+                raise ValueError('dynamic section differs from PT_DYNAMIC')
+        elif (section[1] in (0x6ffffffd, 0x6ffffffe)
+              or (section[1] == 0 and any(layout.by_name.get(name) == section
+                                        for name in ('.gnu.version_d', '.gnu.version_r')))):
+            # LIEF may disable version tags while retaining these named sections.
+            definition = section[1] == 0x6ffffffd or layout.by_name.get('.gnu.version_d') == section
+            visited, relative, occupied = set(), 0, []
+            header_size, auxiliary_size = (20, 8) if definition else (16, 16)
+
+            def bounded(offset, length):
+                if offset < 0 or length > section[5] - offset:
+                    raise ValueError('invalid dynamic string version reference')
+                if any(offset < end and offset + length > begin for begin, end in occupied):
+                    raise ValueError('overlapping dynamic string version records')
+                occupied.append((offset, offset + length))
+                return section[4] + offset
+
+            while True:
+                if relative in visited:
+                    raise ValueError('cyclic dynamic string version reference')
+                visited.add(relative)
+                if definition:
+                    position = bounded(relative, header_size)
+                    version, _, _, count, _, auxiliary, following = struct.unpack_from('<HHHHIII', data, position)
+                else:
+                    position = bounded(relative, header_size)
+                    version, count, filename, auxiliary, following = struct.unpack_from('<HHIII', data, position)
+                    add(filename, 'version-file', position + 4)
+                if version != 1 or not count or count > section[5] // auxiliary_size:
+                    raise ValueError('invalid dynamic string version count')
+                if auxiliary < header_size or (following and following < header_size):
+                    raise ValueError('overlapping dynamic string version header')
+                auxiliary_position = relative + auxiliary
+                auxiliary_visited = set()
+                for index in range(count):
+                    if auxiliary_position in auxiliary_visited:
+                        raise ValueError('cyclic dynamic string version auxiliary')
+                    auxiliary_visited.add(auxiliary_position)
+                    if definition:
+                        field = bounded(auxiliary_position, auxiliary_size)
+                        name, next_auxiliary = struct.unpack_from('<II', data, field)
+                    else:
+                        field = bounded(auxiliary_position, auxiliary_size) + 8
+                        name, next_auxiliary = struct.unpack_from('<II', data, field)
+                    add(name, 'version-name', field)
+                    if (index + 1 == count) != (next_auxiliary == 0):
+                        raise ValueError('invalid dynamic string version auxiliary count')
+                    if next_auxiliary and next_auxiliary < auxiliary_size:
+                        raise ValueError('overlapping dynamic string version auxiliary')
+                    auxiliary_position += next_auxiliary
+                if not following:
+                    break
+                relative += following
+        else:
+            raise ValueError('unsupported consumer of dynamic strings')
+    return {'dynamic': dynamic, 'references': references,
+            'sonames': [item['value'] for item in references if item['scope'] == 'dynamic:0xe']}
+
+
+def scrub_unused_raw_agent_names(data):
+    """Erase only abandoned complete names after the final ELF builder write."""
+    layout = Layout(data)
+    protected = embedded_elf_ranges(data)
+    positions = string_occurrences(data, RAW_AGENT_OLD, '.dynstr', layout, protected)
+    if not positions:
+        return data, []
+    contract = dynstr_references(data, layout)
+    if contract['sonames'] != [RAW_AGENT_NEW]:
+        raise ValueError('old raw Agent cleanup requires the active nianchu SONAME')
+    output, records = bytearray(data), []
+    size = len(RAW_AGENT_OLD.encode()) + 1
+    for position in positions:
+        if any(position < item['end'] and position + size > item['begin']
+               for item in contract['references']):
+            raise ValueError('referenced old raw Agent name must not be erased')
+        output[position:position + size] = b'\0' * size
+        records.append({'old': RAW_AGENT_OLD, 'offset': position, 'size': size,
+                        'scope': '.dynstr-unreferenced-NUL-string', 'action': 'zero-fill'})
+    output = bytes(output)
+    if len(output) != len(data) or dynstr_references(output) != contract:
+        raise ValueError('raw Agent cleanup changed an ELF string consumer')
+    if verify_hashes(output) != verify_hashes(data):
+        raise ValueError('raw Agent cleanup changed dynamic symbol lookup')
+    return output, records
+
+
+def raw_agent_identity(data, require_soname=False):
+    layout = Layout(data)
+    strings = layout.by_name.get('.dynstr')
+    sonames = [layout.string(strings, value) for _, tag, value in dynamic_entries(data, layout)
+               if tag == 14] if strings else []
+    result = {'sonames': sonames, 'old_substring_occurrences': data.count(RAW_AGENT_SIGNATURE.encode()),
+              'old_full_occurrences': data.count(RAW_AGENT_OLD.encode()),
+              'new_full_occurrences': data.count(RAW_AGENT_NEW.encode())}
+    if result['old_substring_occurrences']:
+        raise ValueError('old raw Agent name remains in ELF payload')
+    if require_soname and sonames != [RAW_AGENT_NEW]:
+        raise ValueError('embedded Agent SONAME does not match the nianchu raw library')
+    return result
+
+
 def rewrite_identifiers(data):
     """Stable, injective mapping shared by all kinds, versions and architectures."""
     mapping = {**TYPE_MAP, **DIAGNOSTIC_MAP}
@@ -426,6 +582,7 @@ def verify_embedded_agents(data, expected_entry=AGENT_ENTRY, require_all=True):
         if not exports:
             continue
         layout.exported(expected_entry)
+        raw_identity = raw_agent_identity(payload, require_soname=True)
         audit_result = identifier_audit(payload)
         if any(audit_result['source_old_occurrences'].values()):
             raise ValueError('unpatched FridaAgentStopReason in embedded Agent at ' + hex(start))
@@ -436,7 +593,8 @@ def verify_embedded_agents(data, expected_entry=AGENT_ENTRY, require_all=True):
         records.append({'offset': start, 'extent': stop - start, 'architecture':
                         {183: 'aarch64', 40: 'arm', 62: 'x86_64', 3: 'x86'}[layout.machine],
                         'sha256': digest(payload), 'initialization_symbol': expected_entry,
-                        'hash_tables': verify_hashes(payload), 'identifiers': audit_result})
+                        'hash_tables': verify_hashes(payload), 'identifiers': audit_result,
+                        'raw_agent_identity': raw_identity})
     if require_all and {item['architecture'] for item in records} != {'aarch64', 'arm'}:
         raise ValueError('expected embedded arm64 and arm32 Agent payloads')
     return records
@@ -493,6 +651,8 @@ def rewrite(data, kind, seed=None):
     if rebuilt is None:
         raise ValueError('LIEF parse after raw rewrite failed')
     output = rebuild_gnu_hash(rebuilt.write_to_bytes(config))
+    output, dynstr_cleanup = scrub_unused_raw_agent_names(output)
+    raw_identity = raw_agent_identity(output)
     after = audit(output, arm64=False)
     hashes = verify_hashes(output)
     final = lief.ELF.parse(output)
@@ -524,10 +684,12 @@ def rewrite(data, kind, seed=None):
               'symbols': symbol_changes, 'rodata': rodata_changes, 'raw_strings': path_changes,
               'identifiers': identifiers, 'identifier_changes': identifier_changes,
               'functional_strings_before': functional_before,
-              'brand_strings': brands, 'hash_tables': hashes, 'initialization_symbol': init,
+              'brand_strings': brands, 'dynstr_cleanup': dynstr_cleanup,
+              'raw_agent_identity': raw_identity,
+              'hash_tables': hashes, 'initialization_symbol': init,
               'needed': libraries, 'runtime_tested': False,
               'nested_elf_ranges': embedded_elf_ranges(data),
-              'residual_markers': {s: output.count(s.encode()) for s in (*TYPE_MAP, *SOURCE_TYPE_MAP, *PATH_STRINGS, 'libfrida-agent')}}
+              'residual_markers': {s: output.count(s.encode()) for s in (*TYPE_MAP, *SOURCE_TYPE_MAP, *PATH_STRINGS, 'libfrida-agent', RAW_AGENT_SIGNATURE)}}
     return output, report
 
 
@@ -569,7 +731,29 @@ def validate_rewrite_report(data, report, kind):
     parsed = lief.ELF.parse(data)
     if parsed is None or report.get('needed') != list(parsed.libraries):
         raise ValueError('ELF dependency report mismatch')
-    residual = {s: data.count(s.encode()) for s in (*TYPE_MAP, *SOURCE_TYPE_MAP, *PATH_STRINGS, 'libfrida-agent')}
+    if report.get('raw_agent_identity') != raw_agent_identity(data):
+        raise ValueError('raw Agent identity report mismatch')
+    cleanup = report.get('dynstr_cleanup')
+    if not isinstance(cleanup, list):
+        raise ValueError('missing abandoned dynamic string cleanup report')
+    contract = dynstr_references(data) if cleanup else None
+    strings = layout.by_name.get('.dynstr')
+    seen = set()
+    for item in cleanup:
+        offset = item.get('offset') if isinstance(item, dict) else None
+        size = len(RAW_AGENT_OLD.encode()) + 1
+        if (not isinstance(item, dict) or item.get('old') != RAW_AGENT_OLD
+                or item.get('scope') != '.dynstr-unreferenced-NUL-string'
+                or item.get('action') != 'zero-fill' or item.get('size') != size
+                or type(offset) is not int or offset in seen or strings is None
+                or offset < strings[4] or offset + size > strings[4] + strings[5]
+                or data[offset:offset + size] != b'\0' * size
+                or contract['sonames'] != [RAW_AGENT_NEW]
+                or any(offset < ref['end'] and offset + size > ref['begin']
+                       for ref in contract['references'])):
+            raise ValueError('invalid abandoned dynamic string cleanup record')
+        seen.add(offset)
+    residual = {s: data.count(s.encode()) for s in (*TYPE_MAP, *SOURCE_TYPE_MAP, *PATH_STRINGS, 'libfrida-agent', RAW_AGENT_SIGNATURE)}
     if report.get('residual_markers') != residual:
         raise ValueError('ELF residual marker report mismatch')
     identifiers = identifier_audit(data)

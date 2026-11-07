@@ -408,6 +408,46 @@ class PatchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'source drift'):
                 patches.prepare(source, version)
 
+    def test_raw_agent_target_rename_preserves_meson_source_and_entrypoint_edits(self):
+        relative = 'subprojects/frida-core/lib/agent/meson.build'
+        old = b"shared_library('frida-agent-raw',"
+        new = b"shared_library('nianchu-agent-raw',"
+        for version in patches.VERSIONS:
+            with self.subTest(version=version):
+                recipe = recipe_for(version)
+                entry = next(item for item in recipe['files'] if item['path'] == relative)
+                base = (ROOT / 'tests/fixtures' / version / relative).read_bytes()
+                self.assertEqual(base.count(old), 1)
+                self.assertNotIn(new, base)
+                self.assertEqual(patches.digest(base), entry['upstream_sha256'])
+                self.assertEqual(entry['edits'], [
+                    {'old': old.decode('utf-8'), 'new': new.decode('utf-8'), 'count': 1},
+                ])
+                self.assertEqual(entry['optional'], {'agent-entrypoint-rename': [
+                    {'old': 'frida_agent_main', 'new': 'nianchu_agent_main', 'count': 1},
+                ]})
+                compatible = base.replace(old, new)
+                self.assertEqual(patches.transform(base, entry['edits']), compatible)
+                self.assertEqual(patches.profile_bytes(base, entry, []), compatible)
+
+                source = self.source(version)
+                patches.apply(source, version, self.directory / (version + '-raw-agent.json'))
+                actual = (source / relative).read_bytes()
+                # Only the raw target literal and the existing optional entry symbol may differ.
+                self.assertEqual(actual, compatible.replace(b'frida_agent_main', b'nianchu_agent_main'))
+                self.assertNotIn(old, actual)
+                self.assertEqual(actual.count(new), 1)
+                for preserved in (
+                    b"raw_agent = shared_library('nianchu-agent-raw', agent_sources,",
+                    b"vala_header: 'frida-agent.h'",
+                    b"modulated_agent = custom_target('frida-agent-modulated',",
+                    b'input: raw_agent,',
+                    b"output: 'libfrida-agent-modulated' + shlib_suffix,",
+                    b"agent = custom_target('frida-agent',",
+                    b'input: modulated_agent,',
+                ):
+                    self.assertIn(preserved, actual)
+
     def test_default_agent_entrypoint_definition_exports_and_consumers_match(self):
         manifest = json.loads((ROOT / 'patches/entrypoint-files.json').read_text(encoding='utf-8'))
         for version in patches.VERSIONS:

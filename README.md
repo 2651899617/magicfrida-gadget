@@ -50,7 +50,7 @@ python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录
 
 16 bundled Java bridge 6.3.9 已增加编译前参考 patch hook，移除 PrettyMethod hook；17 外置 7.0.13 使用独立 patch/build 脚本生成 bundle。它们与下节 `direct-art-gc` 实验是两套不同 profile，测试和产物报告分别记录。
 
-`patches/rename.py` 使用固定 LIEF **0.17.6** 和 schema 2 报告：私有 `StopReason` 从源码生成 `NianchuAgentStopReason`，枚举数值、value_name 和 nick 保持；经核对的内部类型及函数诊断使用跨版本、跨架构一致的等长映射 `Frida→Nnchu`／`frida→nnchu`。原始字符串处理限于完整 NUL 字符串和明确清单，普通 `Friday`、公开 Frida API/DBus 类型、`GDBusProxy`、`GumScript`、`GLib-GIO`、ART 查询键、`./lib/android` 和 `FRIDA_V8_EXTRA_FLAGS` 保留。取消通用 `gadget` 子串替换，Zygisk 入口稳定为 `nianchu_gadget_init`。符号表仍使用 LIEF 改写并独立核 GNU/SysV hash；嵌入 Agent/helper 在资源编译前改写，外层 server 不改嵌入 ELF。collector 强制核 arm64/arm32 Agent 的入口、类型改名和残留，未通过就不发布。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。静态/host GLib 契约不等于 Android JS/Java、GC、异常和宿主业务验证。
+`patches/rename.py` 使用固定 LIEF **0.17.6** 和 schema 3 报告：私有 `StopReason` 从源码生成 `NianchuAgentStopReason`，枚举数值、value_name 和 nick 保持；经核对的内部类型及函数诊断使用跨版本、跨架构一致的等长映射 `Frida→Nnchu`／`frida→nnchu`。原始字符串处理限于完整 NUL 字符串和明确清单，普通 `Friday`、公开 Frida API/DBus 类型、`GDBusProxy`、`GumScript`、`GLib-GIO`、ART 查询键、`./lib/android` 和 `FRIDA_V8_EXTRA_FLAGS` 保留。取消通用 `gadget` 子串替换，Zygisk 入口稳定为 `nianchu_gadget_init`。符号表仍使用 LIEF 改写并独立核 GNU/SysV hash；嵌入 Agent/helper 在资源编译前改写，外层 server 不改嵌入 ELF。raw Agent 从 Meson 直接生成 `libnianchu-agent-raw.so`；最后一次 LIEF 写出后，仅清理确认无动态字段、符号或版本字符串引用的完整旧 raw 名，保持字符串表大小与索引。collector 强制核 arm64/arm32 Agent 的入口、实际 SONAME、类型改名和旧 `frida-agent-raw.so` 子串归零，旧 schema 2 报告拒绝复用。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。静态/host GLib 契约不等于 Android JS/Java、GC、异常和宿主业务验证。
 
 ## Java bridge 源码实验
 

@@ -177,6 +177,17 @@
  	private enum StopReason {
  		UNLOAD,
  		PROCESS_TRANSITION
+--- a/subprojects/frida-core/lib/agent/meson.build
++++ b/subprojects/frida-core/lib/agent/meson.build
+@@ -38,7 +38,7 @@
+   extra_link_args += '-Wl,-Bsymbolic'
+ endif
+ 
+-raw_agent = shared_library('frida-agent-raw', agent_sources,
++raw_agent = shared_library('nianchu-agent-raw', agent_sources,
+   name_prefix: 'lib',
+   c_args: frida_component_cflags,
+   vala_header: 'frida-agent.h',
 --- a/subprojects/frida-core/src/frida-glue.c
 +++ b/subprojects/frida-core/src/frida-glue.c
 @@ -40,11 +40,13 @@

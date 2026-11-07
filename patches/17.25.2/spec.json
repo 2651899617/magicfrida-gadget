@@ -427,7 +427,13 @@
     {
       "path": "subprojects/frida-core/lib/agent/meson.build",
       "upstream_sha256": "7b86d0b04a5ceab4a69098ef7b8e3552df8383c64bfe3cd905c9502ef48b9472",
-      "edits": [],
+      "edits": [
+        {
+          "old": "shared_library('frida-agent-raw',",
+          "new": "shared_library('nianchu-agent-raw',",
+          "count": 1
+        }
+      ],
       "optional": {
         "agent-entrypoint-rename": [
           {

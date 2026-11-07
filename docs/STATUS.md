@@ -2,6 +2,14 @@
 
 记录日期：2026-11-07。
 
+## 2026-11-07 raw Agent 名称与动态字符串残留修复
+
+修复基线提交 `90e85c12157314dafbfdaffaf565e0bd61a0e592`，run 42345534583 已成功构建并推送四份简名产物；CI 201 项回归、真实 Vala/GLib 契约及手机两版直接 sleep native Agent/RPC/Interceptor/Memory/resume/unload-detach 通过。该版本的活动 SONAME 已为 `libnianchu-agent-raw.so`，但 LIEF 重建后 `.dynstr` 尾部保留 `libfrida-agent-raw.so`。16 arm64 旧完整串偏移 `0x3C4F`，应用子串命中 `0x3C52`；16 arm32 为 `0x2C61`，17 arm64/arm32 为 `0x38E7`/`0x3009`。旧报告记录残留但未要求归零，因此这些通过记录不证明旧 raw 签名已消除。
+
+本次从两版 Meson 源码直接生成 `libnianchu-agent-raw.so`，保留 raw/modulated/final target 对象和现有消费者。schema 3 在最后一次 ELF builder 写出后检查废弃完整 `.dynstr` 名称：活动 SONAME 必须为新名，动态字段、符号（含后缀引用）和 GNU version 名/file 引用全部避开才可零填充；保持文件大小、表长度、索引及 hash lookup。外层 server 不修改内嵌 ELF。collector 和报告验证强制旧 `frida-agent-raw.so` 子串归零，真实两种架构的 Agent SONAME 必须为新名，旧 schema 2 拒绝复用。
+
+最终ELF专项20/20通过，覆盖未引用字符串清理、live SONAME/NEEDED/后缀引用拒绝、普通及SHT_NULL保留的GNU version文件/aux名称引用、异常链与记录重叠拒绝、嵌入保护、报告和增量重写。两版源码专项34项、产物/模块专项31项通过；最终完整本地回归210项，207通过、3跳过（Windows无法创建符号链接两项，本机缺valac一项）。四份上一构建的真实Agent在内存副本清理后，旧raw签名均为零，程序/节/符号布局、活动字符串引用和hash lookup不变；原产品文件未写回。CI重建和新手机部署正在执行；完成身份及hash记录在独立交付报告。Android Java/ART/目标App/Zygisk安装加载的验收仍独立进行；system_server根因调查保持暂停。
+
 ## 2026-11-07 内部标识与功能契约修复
 
 基线 HEAD `764950b6865cbaf94e81177a753250a04d5bd670`，成功构建 run 41980419791。用户实测的 `FridaAgentStopReason` 偏移 `0x185B72` 精确对应 16 版内嵌 arm64 Agent 的只读段；原规则漏掉首字母大写 `Frida`。两版私有枚举在固定源码 recipe 加入 CCode 注册名 `NianchuAgentStopReason`，保留 Vala 枚举名、0/1、常量前缀和 nick。内部实现类型及诊断字符串使用固定清单和完整 NUL 字符串匹配，等长映射 `Frida→Nnchu`／`frida→nnchu`，不改公开 Frida API/DBus 类型。公共 GLib/Gum 类型、日志域、ART 查询、JS import、枚举 value_name 和环境变量从原随机规则移除，重新编译恢复原值。通用 `gadget` 子串规则移除，模块入口稳定为 `nianchu_gadget_init`。

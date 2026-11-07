@@ -2,6 +2,13 @@
 
 仅以 `E:/frida魔改/fridaneed/最新的frida内容/anti-frida.py` 作为该脚本的采用参考；旧副本不重复登记。用户提供的实践脚本、三套 patch 和文章均按固定源码的适用性、冲突及创建/消费者联动判断，不因使用 LIEF、字符串替换或功能裁剪的形式而整体排除。这里区分“参考已验证”“本项目源码已迁移”“本项目编译/运行已验证”。
 
+## 2026-11-07 raw Agent 库名与废弃动态字符串修复
+
+- run 42345534583 的活动 SONAME 已改为 `libnianchu-agent-raw.so`，应用命中的 `frida-agent-raw.so` 是 `.dynstr` 尾部旧名；四个实际 Agent 各有一处。旧 schema 2 虽记录残留，却没有归零门槛，本节补齐这个缺口。
+- 两版 `lib/agent/meson.build` 只把 raw `shared_library` 名从 `frida-agent-raw` 改成 `nianchu-agent-raw`，raw_agent/modulated_agent/final target 对象、header 和最终路径消费者不改。完整固定源码无按旧 raw 名查找的功能消费者。
+- schema 3 清理最后一次 LIEF 写出后无引用的完整 `.dynstr` 旧名。活动 SONAME 必须为新名；覆盖动态字符串字段、符号后缀、GNU version 名/file 引用，遇仍被引用或未知消费者则拒绝，不作通用子串替换。零填充保持文件大小、字符串表长度及索引。
+- 真实内嵌 Agent、外层收集产物和报告验证新增旧18字节子串归零门槛；arm64/arm32 Agent 同时核 SONAME 与实际入口。原始 maps 的手机签名验收随重新部署进行，编译与静态结构不替代运行测试。
+
 ## 2026-11-07 功能兼容的内部标识修复
 
 本段取代下文旧 schema 1 的整文件随机字符串规则，基于成功 run 41980419791 的 `764950b…` 修复：

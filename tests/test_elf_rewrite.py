@@ -79,6 +79,234 @@ def identifier_fixture(tokens, nested=b''):
 
 
 class ElfRewriteTests(unittest.TestCase):
+    @staticmethod
+    def raw_name_fixture(reference_tag=None, symbol_suffix=False):
+        data = bytearray(fixture())
+        old, new = elf.RAW_AGENT_OLD.encode() + b'\0', elf.RAW_AGENT_NEW.encode() + b'\0'
+        prefix = b'\0frida_one\0frida_two\0'
+        strings = prefix + new + old
+        start = 1024
+        data[start:start + len(strings)] = strings
+        # Move the allocated dynamic string table into unused mapped space.
+        struct.pack_into('<Q', data, 64 + 32, 1280)
+        struct.pack_into('<Q', data, 64 + 40, 1280)
+        struct.pack_into('<Q', data, 1536 + 2 * 64 + 16, start)
+        struct.pack_into('<Q', data, 1536 + 2 * 64 + 24, start)
+        struct.pack_into('<Q', data, 1536 + 2 * 64 + 32, len(strings))
+        tags = [(6, 448), (5, start), (10, len(strings)), (4, 600),
+                (0x6ffffef5, 640), (14, len(prefix))]
+        old_index = len(prefix) + len(new)
+        if reference_tag is not None:
+            tags.append((reference_tag, old_index + 3))
+        tags.append((0, 0))
+        data[800:944] = b'\0' * 144
+        for index, pair in enumerate(tags):
+            struct.pack_into('<qQ', data, 800 + 16 * index, *pair)
+        struct.pack_into('<Q', data, 120 + 32, 16 * len(tags))
+        struct.pack_into('<Q', data, 120 + 40, 16 * len(tags))
+        struct.pack_into('<Q', data, 1536 + 6 * 64 + 32, 16 * len(tags))
+        if symbol_suffix:
+            struct.pack_into('<I', data, 448 + 24, old_index + 3)
+            # No stale hash is allowed to hide a reference-validation mistake.
+            name = elf.Layout(bytes(data)).symbols[11][1]['name']
+            self_check = name == elf.RAW_AGENT_SIGNATURE
+            if not self_check:
+                raise AssertionError('suffix fixture does not reference old raw name')
+        return bytes(data), start + old_index
+
+    @classmethod
+    def gnu_version_fixture(cls, null_sections=False):
+        """Two-record verneed/verdef chains, including non-first aux names."""
+        data, old_position = cls.raw_name_fixture()
+        data = bytearray(data)
+        layout = elf.Layout(data)
+        shoff = struct.unpack_from('<Q', data, 40)[0]
+        strings = layout.by_name['.dynstr']
+        content = bytearray(data[strings[4]:strings[4] + strings[5]])
+        indices = {elf.RAW_AGENT_NEW: content.index(elf.RAW_AGENT_NEW.encode() + b'\0')}
+        for name in ('libc.so', 'LIBC_1.0', 'LIBC_2.0', 'libm.so', 'LIBM_1.0',
+                     'AGENT_1.0', 'AGENT_2.0'):
+            indices[name] = len(content)
+            content.extend(name.encode() + b'\0')
+        data[strings[4]:strings[4] + len(content)] = content
+        struct.pack_into('<Q', data, shoff + 2 * 64 + 32, len(content))
+        names = layout.by_name['.shstrtab']
+        content = data[names[4]:names[4] + names[5]] + b'.gnu.version_r\0.gnu.version_d\0.gnu.version\0'
+        data[names[4]:names[4] + len(content)] = content
+        struct.pack_into('<Q', data, shoff + 64 + 32, len(content))
+        need, definition, versym = 1216, 1312, 1408
+        data.extend(b'\0' * (3 * 64))
+        struct.pack_into('<H', data, 60, len(layout.sections) + 3)
+        for index, (name, kind, offset, size, link, info, align, stride) in enumerate((
+                ('.gnu.version_r', 0 if null_sections else 0x6ffffffe, need, 80, 2, 2, 4, 0),
+                ('.gnu.version_d', 0 if null_sections else 0x6ffffffd, definition, 64, 2, 2, 4, 0),
+                ('.gnu.version', 0x6fffffff, versym, 6, 3, 0, 2, 2)), len(layout.sections)):
+            struct.pack_into('<IIQQQQIIQQ', data, shoff + index * 64,
+                             content.index(name.encode() + b'\0'), kind, 2, offset, offset,
+                             size, link, info, align, stride)
+        struct.pack_into('<Q', data, 64 + 32, shoff)
+        struct.pack_into('<Q', data, 64 + 40, shoff)
+        # DT_STRSZ includes all appended strings, not the padding before verneed.
+        tags = [(tag, struct.unpack_from('<Q', data, shoff + 2 * 64 + 32)[0] if tag == 10 else value)
+                for _, tag, value in elf.dynamic_entries(data, layout) if tag]
+        tags += [(1, indices['libc.so']), (1, indices['libm.so'])]
+        if not null_sections:
+            tags += [(0x6ffffffe, need), (0x6fffffff, 2),
+                     (0x6ffffffc, definition), (0x6ffffffd, 2), (0x6ffffff0, versym)]
+        tags.append((0, 0))
+        data[800:1024] = b'\0' * 224
+        for index, pair in enumerate(tags):
+            struct.pack_into('<qQ', data, 800 + index * 16, *pair)
+        for field in (120 + 32, 120 + 40, shoff + 6 * 64 + 32):
+            struct.pack_into('<Q', data, field, 16 * len(tags))
+        struct.pack_into('<HHIII', data, need, 1, 2, indices['libc.so'], 16, 48)
+        for offset, name, version, following in ((16, 'LIBC_1.0', 4, 16), (32, 'LIBC_2.0', 5, 0),
+                                                  (64, 'LIBM_1.0', 6, 0)):
+            struct.pack_into('<IHHII', data, need + offset, elf.sysv_hash(name), 0, version,
+                             indices[name], following)
+        struct.pack_into('<HHIII', data, need + 48, 1, 1, indices['libm.so'], 16, 0)
+        struct.pack_into('<HHHHIII', data, definition, 1, 0, 2, 2, elf.sysv_hash('AGENT_1.0'), 20, 36)
+        struct.pack_into('<II', data, definition + 20, indices['AGENT_1.0'], 8)
+        struct.pack_into('<II', data, definition + 28, indices[elf.RAW_AGENT_NEW], 0)
+        struct.pack_into('<HHHHIII', data, definition + 36, 1, 0, 3, 1, elf.sysv_hash('AGENT_2.0'), 20, 0)
+        struct.pack_into('<II', data, definition + 56, indices['AGENT_2.0'], 0)
+        struct.pack_into('<HHH', data, versym, 0, 2, 0x8003)
+        fields = [('version-file', need + 4, 'libc.so'),
+                  ('version-name', need + 24, 'LIBC_1.0'), ('version-name', need + 40, 'LIBC_2.0'),
+                  ('version-file', need + 52, 'libm.so'), ('version-name', need + 72, 'LIBM_1.0'),
+                  ('version-name', definition + 20, 'AGENT_1.0'),
+                  ('version-name', definition + 28, elf.RAW_AGENT_NEW),
+                  ('version-name', definition + 56, 'AGENT_2.0')]
+        references = [{'index': indices[name], 'value': name, 'scope': scope, 'field': field,
+                       'begin': strings[4] + indices[name],
+                       'end': strings[4] + indices[name] + len(name.encode()) + 1}
+                      for scope, field, name in fields]
+        return bytes(data), old_position, references
+
+    def test_gnu_version_cleanup_preserves_all_references_and_symbol_indexes(self):
+        for null_sections in (False, True):
+            with self.subTest(null_sections=null_sections):
+                data, position, expected = self.gnu_version_fixture(null_sections)
+                before = elf.Layout(data)
+                contract = elf.dynstr_references(data)
+                self.assertEqual([ref for ref in contract['references']
+                                  if ref['scope'].startswith('version-')], expected)
+                self.assertEqual(before.by_name['.gnu.version_r'][1], 0 if null_sections else 0x6ffffffe)
+                self.assertEqual(before.by_name['.gnu.version_d'][1], 0 if null_sections else 0x6ffffffd)
+                version_tags = {0x6ffffffe, 0x6fffffff, 0x6ffffffc, 0x6ffffffd, 0x6ffffff0}
+                self.assertEqual({tag for _, tag, _ in contract['dynamic']} & version_tags,
+                                 set() if null_sections else version_tags)
+                output, records = elf.scrub_unused_raw_agent_names(data)
+                self.assertEqual(output, data[:position] + b'\0' * 22 + data[position + 22:])
+                self.assertEqual(records, [{'old': elf.RAW_AGENT_OLD, 'offset': position, 'size': 22,
+                                           'scope': '.dynstr-unreferenced-NUL-string', 'action': 'zero-fill'}])
+                self.assertEqual(elf.dynstr_references(output), contract)
+                after = elf.Layout(output)
+                self.assertEqual(after.sections, before.sections)
+                self.assertEqual(after.programs, before.programs)
+                self.assertEqual(after.symbols, before.symbols)
+                versym = before.by_name['.gnu.version']
+                self.assertEqual(struct.unpack_from('<HHH', output, versym[4]), (0, 2, 0x8003))
+                self.assertEqual(elf.verify_hashes(output), elf.verify_hashes(data))
+                self.assertEqual(elf.raw_agent_identity(output, True)['old_substring_occurrences'], 0)
+                self.assertEqual(elf.scrub_unused_raw_agent_names(output), (output, []))
+
+    def test_gnu_version_file_aux_and_suffix_references_prevent_cleanup(self):
+        for null_sections in (False, True):
+            original, position, references = self.gnu_version_fixture(null_sections)
+            old_index = position - elf.Layout(original).by_name['.dynstr'][4]
+            for reference in references:
+                for suffix in (0, 3):
+                    with self.subTest(null_sections=null_sections, field=reference['field'], suffix=suffix):
+                        data = bytearray(original)
+                        struct.pack_into('<I', data, reference['field'], old_index + suffix)
+                        contract = elf.dynstr_references(bytes(data))
+                        actual = next(ref for ref in contract['references'] if ref['field'] == reference['field'])
+                        self.assertEqual(actual['scope'], reference['scope'])
+                        self.assertEqual(actual['value'], elf.RAW_AGENT_OLD[suffix:])
+                        self.assertEqual(actual['begin'], position + suffix)
+                        self.assertEqual(actual['end'], position + 22)
+                        with self.assertRaisesRegex(ValueError, 'referenced old raw Agent name must not be erased'):
+                            elf.scrub_unused_raw_agent_names(bytes(data))
+
+    def test_gnu_version_malformed_chains_prevent_cleanup(self):
+        for null_sections in (False, True):
+            original, _, _ = self.gnu_version_fixture(null_sections)
+            layout = elf.Layout(original)
+            for name, count, auxiliary, following, last, last_auxiliary, last_next in (
+                    ('.gnu.version_r', 2, 8, 12, 48, 8, 76),
+                    ('.gnu.version_d', 6, 12, 16, 36, 12, 60)):
+                section = layout.by_name[name]
+                cases = [('version', 0, '<H', 2), ('zero-count', count, '<H', 0),
+                         ('short-count', count, '<H', 1), ('long-count', count, '<H', 3),
+                         ('aux-outside-section', auxiliary, '<I', section[5]),
+                         ('next-outside-section', following, '<I', section[5]),
+                         ('unterminated-aux', last_next, '<I', 8),
+                         ('aux-overlaps-header', last + last_auxiliary, '<I', 0),
+                         ('next-overlaps-header', following, '<I', 4),
+                         ('next-overlaps-earlier-aux', following, '<I', 16 if name.endswith('_r') else 20),
+                         ('aux-chain-overlap', 28 if name.endswith('_r') else 24, '<I', 4)]
+                for case, offset, fmt, value in cases:
+                    with self.subTest(null_sections=null_sections, section=name, case=case):
+                        data = bytearray(original)
+                        struct.pack_into(fmt, data, section[4] + offset, value)
+                        with self.assertRaises(ValueError):
+                            elf.dynstr_references(bytes(data))
+                        with self.assertRaises(ValueError):
+                            elf.scrub_unused_raw_agent_names(bytes(data))
+
+    def test_abandoned_dynstr_cleanup_preserves_layout_loader_and_hashes(self):
+        data, position = self.raw_name_fixture()
+        output, records = elf.scrub_unused_raw_agent_names(data)
+        self.assertEqual(output, data[:position] + b'\0' * 22 + data[position + 22:])
+        self.assertEqual(elf.dynstr_references(data), elf.dynstr_references(output))
+        self.assertEqual(elf.verify_hashes(data), elf.verify_hashes(output))
+        self.assertEqual(elf.Layout(data).sections, elf.Layout(output).sections)
+        self.assertEqual(elf.Layout(data).programs, elf.Layout(output).programs)
+        self.assertEqual(elf.raw_agent_identity(output, True)['old_substring_occurrences'], 0)
+        self.assertEqual(records, [{'old': elf.RAW_AGENT_OLD, 'offset': position, 'size': 22,
+                                   'scope': '.dynstr-unreferenced-NUL-string', 'action': 'zero-fill'}])
+        self.assertEqual(elf.scrub_unused_raw_agent_names(output), (output, []))
+
+    def test_dynstr_cleanup_rejects_live_soname_needed_and_suffix_references(self):
+        for tag in (1, 14, 29, 0x7fffffff):
+            with self.subTest(tag=tag):
+                data, _ = self.raw_name_fixture(reference_tag=tag)
+                with self.assertRaisesRegex(ValueError, 'active nianchu SONAME|referenced old raw'):
+                    elf.scrub_unused_raw_agent_names(data)
+        data, _ = self.raw_name_fixture(symbol_suffix=True)
+        with self.assertRaisesRegex(ValueError, 'referenced old raw'):
+            elf.scrub_unused_raw_agent_names(data)
+
+    def test_raw_name_gate_covers_substrings_outside_dynstr_and_nested_agents(self):
+        data = identifier_fixture([b'prefix' + elf.RAW_AGENT_SIGNATURE.encode() + b'suffix'])
+        self.assertEqual(elf.scrub_unused_raw_agent_names(data), (data, []))
+        with self.assertRaisesRegex(ValueError, 'old raw Agent name remains'):
+            elf.raw_agent_identity(data)
+        nested, _ = self.raw_name_fixture()
+        data = identifier_fixture([b'outer'], nested=nested)
+        self.assertEqual(elf.scrub_unused_raw_agent_names(data), (data, []))
+        with self.assertRaisesRegex(ValueError, 'old raw Agent name remains'):
+            elf.raw_agent_identity(data)
+
+    def test_previous_schema2_report_cannot_bypass_raw_name_gate(self):
+        with self.assertRaisesRegex(ValueError, 'invalid ELF rewrite report'):
+            elf.validate_rewrite_report(fixture(), {'schema': 2, 'profile': 'nianchu-functional-identifiers-v2'}, 'helper')
+
+    def test_lief_final_write_cleanup_report_and_incremental_validation(self):
+        try:
+            import lief  # noqa: F401
+        except ImportError:
+            self.skipTest('rewrite requires pinned LIEF')
+        data, _ = self.raw_name_fixture()
+        output, report = elf.rewrite(data, 'helper', seed='dynstr-regression')
+        self.assertEqual(report['raw_agent_identity']['old_substring_occurrences'], 0)
+        self.assertEqual(len(report['dynstr_cleanup']), 1)
+        self.assertIs(elf.validate_rewrite_report(output, report, 'helper'), report)
+        corrupted = dict(report, dynstr_cleanup=[dict(report['dynstr_cleanup'][0], offset=0)])
+        with self.assertRaisesRegex(ValueError, 'cleanup record'):
+            elf.validate_rewrite_report(output, corrupted, 'helper')
+
     def test_internal_mapping_is_stable_bounded_and_preserves_public_contracts(self):
         public = [b'Friday', b'FridaAgentSession', b'FridaScriptRuntime', b'FRIDA_SCRIPT_RUNTIME_QJS',
                   *[name.encode() for name in elf.FUNCTIONAL_STRINGS]]
