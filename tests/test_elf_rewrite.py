@@ -491,13 +491,13 @@ class ElfRewriteTests(unittest.TestCase):
             self.assertEqual(elf.main(args), 1)
             self.assertEqual(artifact.read_bytes(), original)
 
-    def test_four_real_gadgets_in_memory(self):
+    def test_four_real_legacy_gadgets_rejected_by_complete_load_budget(self):
         artifact_root = Path(os.environ.get('NIANCHU_ELF_SMOKE_ROOT', str(ROOT.parent / 'work')))
         files = [artifact_root / ('nianchu-build-41951726835-' + version) / 'files/out' / variant /
                  ('nianchu-gadget-' + ('zygisk-' if variant == 'zygisk' else '') + version + '-android-arm64.so')
                  for version in ('16.7.19', '17.25.2') for variant in ('compatible', 'zygisk')]
         if not all(path.is_file() for path in files):
-            self.skipTest('real Gadget artifacts unavailable; set NIANCHU_ELF_SMOKE_ROOT')
+            self.skipTest('legacy Gadget artifacts unavailable; set NIANCHU_ELF_SMOKE_ROOT')
         try:
             import lief  # noqa: F401
         except ImportError:
@@ -505,18 +505,13 @@ class ElfRewriteTests(unittest.TestCase):
         for path in files:
             with self.subTest(artifact=str(path)):
                 data = path.read_bytes()
-                output, report = elf.rewrite(data, 'gadget', seed='memory-smoke')
-                self.assertIs(elf.validate_rewrite_report(output, report, 'gadget'), report)
-                self.assertFalse(report['runtime_tested'])
-                self.assertEqual(report['before']['sha256'], elf.digest(data))
-                self.assertEqual(elf.digest(path.read_bytes()), elf.digest(data))
-                self.assertIn('sysv', report['hash_tables']['tables'])
-                if path.parent.name == 'zygisk':
-                    elf.Layout(output).exported(report['initialization_symbol'])
-                else:
-                    self.assertIsNone(report['initialization_symbol'])
-                for start, stop in elf.embedded_elf_ranges(data):
-                    self.assertIn(data[start:stop], output)
+                before = elf.digest(data)
+                # A symbol/allowlist-only pass cannot meet the new profile. Refuse
+                # publication instead of treating a historical build as outlined.
+                self.assertGreaterEqual(elf.readable_load_audit(data)['total_frida_matching_callbacks'], 21)
+                with self.assertRaisesRegex(ValueError, 'gadget readable PT_LOAD signature budget exceeded'):
+                    elf.rewrite(data, 'gadget', seed='memory-smoke')
+                self.assertEqual(elf.digest(path.read_bytes()), before)
 
 
 if __name__ == '__main__':

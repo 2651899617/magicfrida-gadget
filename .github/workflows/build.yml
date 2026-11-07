@@ -20,6 +20,8 @@ jobs:
   checks:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    env:
+      STRING_OUTLINE_REQUIRE_HOST: '1'
     steps:
       - uses: actions/checkout@v4
       - name: Run offline regression gates
@@ -29,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-venv valac libglib2.0-dev build-essential pkg-config
           python3 -I -m venv "$GITHUB_WORKSPACE/.checks-venv"
-          "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -m pip install 'lief==0.17.6'
+          "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -m pip install 'lief==0.17.6' 'tree-sitter==0.25.2' 'tree-sitter-c==0.24.2' 'tree-sitter-cpp==0.23.4'
           "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -B -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee logs/regression.log
           "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I scripts/verify_vala_stop_reason.py --out reports/vala-stop-reason 2>&1 | tee logs/vala-stop-reason.log
       - name: Keep regression log
@@ -77,10 +79,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I -m venv "$GITHUB_WORKSPACE/.elf-venv"
-          "$GITHUB_WORKSPACE/.elf-venv/bin/python3" -I -m pip install 'lief==0.17.6'
+          "$GITHUB_WORKSPACE/.elf-venv/bin/python3" -I -m pip install 'lief==0.17.6' 'tree-sitter==0.25.2' 'tree-sitter-c==0.24.2' 'tree-sitter-cpp==0.23.4'
           printf '%s\n' "$GITHUB_WORKSPACE/.elf-venv/bin" >> "$GITHUB_PATH"
           printf '%s\n' "NIANCHU_ELF_REWRITER=$GITHUB_WORKSPACE/patches/rename.py" >> "$GITHUB_ENV"
           printf '%s\n' "NIANCHU_BRIDGE_PATCHER=$GITHUB_WORKSPACE/scripts/patch_reference_bridge.py" >> "$GITHUB_ENV"
+          printf '%s\n' "NIANCHU_STRING_OUTLINER=$GITHUB_WORKSPACE/scripts/outline_elf_strings.py" >> "$GITHUB_ENV"
       - name: Configure JDK 17 for Android SDK tools
         uses: actions/setup-java@v4
         with:
@@ -113,6 +116,16 @@ jobs:
             --dry-run --report reports/compatible-dry-run.json 2>&1 | tee logs/compatible-patches.log
           python3 -I scripts/apply_patches.py --source frida-src --version "$FRIDA_VERSION" \
             --report reports/compatible.json 2>&1 | tee -a logs/compatible-patches.log
+      - name: Prepare isolated string outlining compiler
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.elf-venv/bin/python3" -I scripts/install_string_outline.py \
+            --source "$GITHUB_WORKSPACE/frida-src" --version "$FRIDA_VERSION" \
+            --state-dir "$GITHUB_WORKSPACE/outline-state" \
+            --python "$GITHUB_WORKSPACE/.elf-venv/bin/python3" \
+            --outliner "$GITHUB_WORKSPACE/scripts/outline_elf_strings.py" \
+            --env-output "$GITHUB_ENV" --report reports/string-outline-prepare.json \
+            2>&1 | tee logs/string-outline-prepare.log
       - name: Configure Android arm64 server and Gadget
         working-directory: frida-src
         run: |
@@ -130,6 +143,14 @@ jobs:
             -Dfrida-core:tests=disabled -Dfrida-gum:tests=disabled \
             -Dfrida-core:assets=embedded "${extra[@]}" \
             2>&1 | tee ../logs/configure.log
+      - name: Check persistent Android compiler arrays
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.elf-venv/bin/python3" -I scripts/install_string_outline.py \
+            --state-dir "$GITHUB_WORKSPACE/outline-state" \
+            --report reports/string-outline-compiler-arrays.json \
+            --build "$GITHUB_WORKSPACE/frida-src/build" \
+            2>&1 | tee logs/string-outline-compiler-arrays.log
       - name: Build nianchu server and modified auto-init Gadget
         working-directory: frida-src
         run: |
@@ -187,6 +208,7 @@ jobs:
           path: |
             logs/
             reports/
+            outline-state/reports/
             frida-src/build/meson-logs/
             frida-src/build/meson-info/intro-targets.json
           if-no-files-found: warn

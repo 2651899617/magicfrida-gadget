@@ -447,3 +447,19 @@
  #endif
  
    tmp_dir = g_get_tmp_dir ();
+--- a/releng/env_android.py
++++ b/releng/env_android.py
+@@ -52,6 +52,13 @@
+         argv = [str(path)]
+         if len(rest) != 0:
+             argv += rest[0]
++
++        # NIANCHU: keep an argv prefix in Meson compiler arrays across regeneration.
++        if identifier in {"c", "cpp"} and environ.get("NIANCHU_STRING_OUTLINER"):
++            argv = [environ["NIANCHU_STRING_OUTLINE_PYTHON"], "-I",
++                    environ["NIANCHU_STRING_OUTLINE_COMPILER"],
++                    "--config", environ["NIANCHU_STRING_OUTLINE_CONFIG"],
++                    "--language", identifier, "--build-root", str(outdir), "--", *argv]
+ 
+         raw_val = strv_to_meson(argv)
+         if identifier in {"c", "cpp"}:

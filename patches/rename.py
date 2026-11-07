@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import struct
 import sys
 
@@ -65,8 +66,11 @@ DIAGNOSTIC_STRINGS = (
 TYPE_MAP = {name: 'Nnchu' + name[5:] for name in INTERNAL_TYPES}
 DIAGNOSTIC_MAP = {name: 'nnchu' + name[5:] for name in DIAGNOSTIC_STRINGS}
 SOURCE_TYPE_MAP = {'FridaAgentStopReason': 'NianchuAgentStopReason'}
-REPORT_SCHEMA = 3
-REPORT_PROFILE = 'nianchu-functional-identifiers-v3'
+REPORT_SCHEMA = 4
+REPORT_PROFILE = 'nianchu-functional-identifiers-v4'
+READABLE_LOAD_THRESHOLD = 21
+PRINTABLE_RUN = re.compile(rb'[\x20-\x7e]{4,}')
+READABLE_LOAD_MARKER = re.compile(rb'frida', re.IGNORECASE)
 RAW_AGENT_OLD = 'libfrida-agent-raw.so'
 RAW_AGENT_NEW = 'libnianchu-agent-raw.so'
 RAW_AGENT_SIGNATURE = 'frida-agent-raw.so'
@@ -187,6 +191,89 @@ def audit(data, arm64=True):
             'elf_type': layout.kind, 'size': len(data), 'sha256': digest(data), 'binary_modified': False,
             'checks': 'ELF bounds only; no runtime, hash-table lookup or protocol handshake claim',
             'protected_markers': {token.decode(): data.count(token) for token in PROTECTED}}
+
+
+def enumerate_readable_segment(data, start, size):
+    """Enumerate E-round ASCII callbacks, including non-NUL delimiters."""
+    end = start + size
+    if start < 0 or size < 0 or end > len(data):
+        raise ValueError('readable segment exceeds file boundary')
+    for run in PRINTABLE_RUN.finditer(data, start, end):
+        begin, stop = run.span()
+        for position in range(begin, stop, 256):
+            if position >= end - 4:
+                break
+            chunk_end = min(position + 256, stop)
+            if chunk_end - position > 3:
+                yield position, data[position:chunk_end], begin, stop
+
+
+def readable_load_audit(data):
+    """Calibrated disk-byte model; never substitute section or substring counts."""
+    layout = Layout(data)
+    callbacks, matches, segments = 0, [], []
+    total_filesz = 0
+    for index, program in enumerate(layout.programs):
+        if program[0] != 1 or not program[1] & 4:
+            continue
+        _, flags, offset, vaddr, _, filesz, memsz, alignment = program
+        prior_callbacks, prior_hits = callbacks, len(matches)
+        total_filesz += filesz
+        for position, text, begin, stop in enumerate_readable_segment(data, offset, filesz):
+            callbacks += 1
+            occurrences = list(READABLE_LOAD_MARKER.finditer(text))
+            if not occurrences:
+                continue
+            value = text.decode('ascii')
+            if 're.frida' in value.lower() or 're/frida' in value.lower():
+                reason = 'original DBus interface or object-path value'
+            elif 'frida:rpc' in value.lower():
+                reason = 'original RPC protocol value'
+            elif value == 'Friday':
+                reason = 'original weekday text'
+            elif value.startswith('FRIDA_'):
+                reason = 'original enum, environment or ABI text'
+            else:
+                reason = 'residual disk bytes; content alone does not prove its consumer'
+            matches.append({'program_header_index': index, 'callback_ordinal': callbacks,
+                            'file_offset': position, 'virtual_address': vaddr + position - offset,
+                            'length': len(text), 'text': value,
+                            'marker_occurrences': len(occurrences),
+                            'run_length': stop - begin, 'chunk_index': (position - begin) // 256,
+                            'functional_reason': reason})
+        segments.append({'program_header_index': index, 'flags': flags,
+                         'file_offset': offset, 'virtual_address': vaddr,
+                         'filesz': filesz, 'memsz': memsz, 'alignment': alignment,
+                         'printable_callbacks': callbacks - prior_callbacks,
+                         'matching_callbacks': len(matches) - prior_hits})
+    if not segments or total_filesz == 0:
+        raise ValueError('missing nonempty readable PT_LOAD')
+    threshold_hit = matches[READABLE_LOAD_THRESHOLD - 1] if len(matches) >= READABLE_LOAD_THRESHOLD else None
+    return {'schema': 1, 'model': 'E-sub_4E500-PF_R-PT_LOAD-p_filesz-ASCII-256',
+            'sha256': digest(data), 'architecture':
+            {183: 'aarch64', 40: 'arm', 62: 'x86_64', 3: 'x86'}[layout.machine],
+            'scope': 'complete disk PT_LOAD bytes; runtime relocations and writes are not modeled',
+            'segments_in_original_program_header_order': segments,
+            'total_readable_load_filesz': total_filesz,
+            'total_printable_string_callbacks': callbacks,
+            'total_frida_matching_callbacks': len(matches),
+            'total_marker_occurrences_inside_matching_callbacks': sum(item['marker_occurrences'] for item in matches),
+            'threshold': READABLE_LOAD_THRESHOLD,
+            'below_threshold': len(matches) < READABLE_LOAD_THRESHOLD,
+            'threshold_callback_ordinal': None if threshold_hit is None else threshold_hit['callback_ordinal'],
+            'threshold_file_offset': None if threshold_hit is None else threshold_hit['file_offset'],
+            'matches': matches}
+
+
+def require_readable_load_budget(data, kind):
+    result = readable_load_audit(data)
+    if kind in ('agent', 'gadget') and not result['below_threshold']:
+        first = result['matches'][0]
+        raise ValueError(kind + ' readable PT_LOAD signature budget exceeded: ' +
+                         str(result['total_frida_matching_callbacks']) + ' >= ' +
+                         str(READABLE_LOAD_THRESHOLD) + '; first ' + hex(first['file_offset']) +
+                         ': ' + first['text'])
+    return result
 
 
 def sysv_hash(name):
@@ -590,10 +677,12 @@ def verify_embedded_agents(data, expected_entry=AGENT_ENTRY, require_all=True):
             raise ValueError('source GType rename missing in embedded Agent at ' + hex(start))
         if any(audit_result['complete_old_types'].values()):
             raise ValueError('old internal type remains in embedded Agent at ' + hex(start))
+        readable = require_readable_load_budget(payload, 'agent')
         records.append({'offset': start, 'extent': stop - start, 'architecture':
                         {183: 'aarch64', 40: 'arm', 62: 'x86_64', 3: 'x86'}[layout.machine],
                         'sha256': digest(payload), 'initialization_symbol': expected_entry,
                         'hash_tables': verify_hashes(payload), 'identifiers': audit_result,
+                        'readable_load_strings': readable,
                         'raw_agent_identity': raw_identity})
     if require_all and {item['architecture'] for item in records} != {'aarch64', 'arm'}:
         raise ValueError('expected embedded arm64 and arm32 Agent payloads')
@@ -678,6 +767,9 @@ def rewrite(data, kind, seed=None):
     nested_after = [output[start:stop] for start, stop in embedded_elf_ranges(output)]
     if nested_after != nested_before:
         raise ValueError('outer rewrite changed an embedded ELF payload')
+    readable = require_readable_load_budget(output, kind)
+    if kind == 'server':
+        verify_embedded_agents(output)
     report = {'schema': REPORT_SCHEMA, 'profile': REPORT_PROFILE, 'kind': kind,
               'lief_version': LIEF_VERSION, 'seed': seed, 'before': before, 'after': after,
               'binary_modified': data != output, 'random_symbol_token': random_name,
@@ -686,6 +778,7 @@ def rewrite(data, kind, seed=None):
               'functional_strings_before': functional_before,
               'brand_strings': brands, 'dynstr_cleanup': dynstr_cleanup,
               'raw_agent_identity': raw_identity,
+              'readable_load_strings': readable,
               'hash_tables': hashes, 'initialization_symbol': init,
               'needed': libraries, 'runtime_tested': False,
               'nested_elf_ranges': embedded_elf_ranges(data),
@@ -733,6 +826,11 @@ def validate_rewrite_report(data, report, kind):
         raise ValueError('ELF dependency report mismatch')
     if report.get('raw_agent_identity') != raw_agent_identity(data):
         raise ValueError('raw Agent identity report mismatch')
+    readable = require_readable_load_budget(data, kind)
+    if report.get('readable_load_strings') != readable:
+        raise ValueError('readable PT_LOAD signature report mismatch')
+    if kind == 'server':
+        verify_embedded_agents(data)
     cleanup = report.get('dynstr_cleanup')
     if not isinstance(cleanup, list):
         raise ValueError('missing abandoned dynamic string cleanup report')

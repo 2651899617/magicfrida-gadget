@@ -28,6 +28,11 @@ EXTRA_GUM_FILES = {
     '17.25.2': {'gum/gum.c': '62d0a353bafb5edc87adf18460dcc7a0dcf0e1280c81f3c84cbb6e6988e3be4e'},
 }
 
+STRING_OUTLINE_RELENG_FILES = {
+    '16.7.19': {'releng/env_android.py': 'fddf203f9234a5604c275eeec32ac2795f2f0b9459312d8f2915ea66a6acc9c5'},
+    '17.25.2': {'releng/env_android.py': '33efcf33095441ce6b54f4074740acc66dec149e13abb8cedc2dc3cfeb1b37b4'},
+}
+
 
 def edit(old, new, count=1):
     return {'old': old, 'new': new, 'count': count}
@@ -56,6 +61,7 @@ def main():
         extras.update({'subprojects/frida-core/' + path: sha for path, sha in gadget_files.items()})
         fullpatch_files = json.loads((ROOT / 'patches/fullpatch-files.json').read_text(encoding='utf-8'))[version]
         extras.update({'subprojects/frida-core/' + path: sha for path, sha in fullpatch_files.items()})
+        extras.update(STRING_OUTLINE_RELENG_FILES[version])
         for path, sha in extras.items():
             matches = [guard for guard in guards if guard['path'] == path]
             if matches:
@@ -70,7 +76,24 @@ def main():
                 raise ValueError('fixture drift: ' + relative)
             text = data.decode('utf-8')
             changes, optional = [], {}
-            if relative.endswith('server/server.vala'):
+            if relative == 'releng/env_android.py':
+                old = '''        raw_val = strv_to_meson(argv)
+        if identifier in {"c", "cpp"}:
+            raw_val += " + common_flags"
+'''
+                new = '''        # NIANCHU: keep an argv prefix in Meson compiler arrays across regeneration.
+        if identifier in {"c", "cpp"} and environ.get("NIANCHU_STRING_OUTLINER"):
+            argv = [environ["NIANCHU_STRING_OUTLINE_PYTHON"], "-I",
+                    environ["NIANCHU_STRING_OUTLINE_COMPILER"],
+                    "--config", environ["NIANCHU_STRING_OUTLINE_CONFIG"],
+                    "--language", identifier, "--build-root", str(outdir), "--", *argv]
+
+        raw_val = strv_to_meson(argv)
+        if identifier in {"c", "cpp"}:
+            raw_val += " + common_flags"
+'''
+                changes = [edit(old, new)]
+            elif relative.endswith('server/server.vala'):
                 changes = [edit('private const string DEFAULT_DIRECTORY = "re.frida.server";',
                                 'private static string DEFAULT_DIRECTORY;'),
                            edit('\tprivate static int main (string[] args) {\n',

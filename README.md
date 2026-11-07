@@ -30,7 +30,7 @@ Android arm64 自有源码构建工程，面向自有或已明确授权的测试
 
 默认 recipe 按参考 patch 开启 `exit-monitor-off`、`signal-interposition-off`、`agent-entrypoint-rename` 和 `gadget-json-config`。server 默认资源目录与 agent 前缀使用 UUID；helper、socket、memfd 和初始化品牌使用 `nianchu`。RPC 标记通过双层 Base64 解码生成，线上协议值仍为 `frida:rpc`；Droidy/ADB 对参考 patch 指定的 OPEN/CLSE/WRTE 分支执行 break。Linux 临时目录返回值按参考改为 `/system/lib64`，其设备权限与运行影响尚待实机验证。系统 Python 和现有 frida.exe 保持原状。
 
-两版 pinned guard 为 **50／55** 份文件。基线提交 `764950b6865cbaf94e81177a753250a04d5bd670` 的 run 41980419791 已完成两版完整构建；2026-11-07 增补内部标识改名与功能查询键保留，新构建和验证记录另见 `docs/STATUS.md`。
+两版 pinned guard 为 **51／56** 份文件，包含 Android 编译入口 `releng/env_android.py`。基线提交 `a8c907f212ffa588223de8bb8598302e4612e394` 的 run 42353264303 已完成 raw Agent 名称修复、完整构建和四简名手机交付；E 轮编码改造的新构建和验证记录另见 `docs/STATUS.md`。
 
 | feature | 当前默认与作用 |
 |---|---|
@@ -50,7 +50,11 @@ python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录
 
 16 bundled Java bridge 6.3.9 已增加编译前参考 patch hook，移除 PrettyMethod hook；17 外置 7.0.13 使用独立 patch/build 脚本生成 bundle。它们与下节 `direct-art-gc` 实验是两套不同 profile，测试和产物报告分别记录。
 
-`patches/rename.py` 使用固定 LIEF **0.17.6** 和 schema 3 报告：私有 `StopReason` 从源码生成 `NianchuAgentStopReason`，枚举数值、value_name 和 nick 保持；经核对的内部类型及函数诊断使用跨版本、跨架构一致的等长映射 `Frida→Nnchu`／`frida→nnchu`。原始字符串处理限于完整 NUL 字符串和明确清单，普通 `Friday`、公开 Frida API/DBus 类型、`GDBusProxy`、`GumScript`、`GLib-GIO`、ART 查询键、`./lib/android` 和 `FRIDA_V8_EXTRA_FLAGS` 保留。取消通用 `gadget` 子串替换，Zygisk 入口稳定为 `nianchu_gadget_init`。符号表仍使用 LIEF 改写并独立核 GNU/SysV hash；嵌入 Agent/helper 在资源编译前改写，外层 server 不改嵌入 ELF。raw Agent 从 Meson 直接生成 `libnianchu-agent-raw.so`；最后一次 LIEF 写出后，仅清理确认无动态字段、符号或版本字符串引用的完整旧 raw 名，保持字符串表大小与索引。collector 强制核 arm64/arm32 Agent 的入口、实际 SONAME、类型改名和旧 `frida-agent-raw.so` 子串归零，旧 schema 2 报告拒绝复用。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。静态/host GLib 契约不等于 Android JS/Java、GC、异常和宿主业务验证。
+`patches/rename.py` 使用固定 LIEF **0.17.6** 和 schema 4 报告，保留已有内部标识和 raw Agent 清理规则。私有 `StopReason` 注册名为 `NianchuAgentStopReason`，枚举数值、value_name/nick 不变；raw Agent 从 Meson 生成 `libnianchu-agent-raw.so`，最后一次 LIEF 写出后只清除确认无动态字段、符号或版本引用的完整旧名。GNU/SysV hash 和 arm64/arm32 内嵌 Agent 的入口、实际 SONAME、新类型正向锚点、旧 raw 子串归零仍强制核验。
+
+新增 `scripts/outline_elf_strings.py` 在编译前处理预处理 C/C++。原功能字符串和指定 gumjs 数字资源存为编码字节，通过长期 heap 缓存恢复；AST 指定静态表字段、资源引用和函数名，保留公共查询键、wire/API、enum name/nick、source_tag 以及原资源字节、长度和 `sizeof`。不安全上下文保留并报告具体原因。两版 Android `releng/env_android.py` 的 Meson compiler 数组使用外置 Python `-I` wrapper，兼容 arm32 同样接入；精确 parser pins、工具 SHA、原 source SHA/mode、原依赖及 target/sysroot 都核验。最终输入使用 `cpp-output`／`c++-cpp-output`，避免 forced header 二次展开。
+
+schema 4 重新枚举最终全部可读 PT_LOAD 的 `p_filesz`：ASCII 0x20–0x7e、每片最多 256 字节、大小写不敏感匹配 `frida`、每个 callback 计一次。每份 Agent/Gadget 必须少于 21 次，server 内嵌两架构分别检查；旧 schema 3 拒绝复用。普通 `Friday` 与原缓存 SDK 残留列入预算，原功能值不得靠逐串改 QuickJS bytecode 消除。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。host 契约与磁盘计数不替代 Android JS/Java、GC、异常和宿主业务运行验证。
 
 ## Java bridge 源码实验
 
@@ -105,9 +109,9 @@ python -I -B scripts/apply_dependency_profile.py --component releng --version 16
 
 ## KPM 边界
 
-内核工程不在本仓库构建工作流内。最新本地 KPM 安全基线只提供默认无 hook、可选精确 reader UID 的有界观察，**不包含 maps/路径/调试状态隐藏能力**。离线 ELF/策略检查不等于目标内核 ABI 或真实加载验证；不能将该观察基线称为通用隐藏模块已完成。
+内核工程位于工作目录独立的 `nianchu-ptrace-kpm`。按用户最新要求，`nianchu-ptrace 1.1.1` 正在加入当前读取者或调用者 `UID > 10000` 门槛，maps、TracerPid 和 TRACEME 统一适用；UID 10000、root、shell 保留原行为，没有特定 App UID 名单或被读目标 PID/UID 过滤。maps 精确将 `/memfd:nianchu-cache` 显示为 `/nianchu-cache`，保留 deleted 后缀、数字字段与真实 VMA/vm_file；`maps=on/off` 可控。已核对 xiaojiahide、pandahide 的调用局部 count 快照和新增输出处理方式。KPM 编译和 Unicorn 测试、手机文件推送、实际内核 ABI 与加载验证分别记录。
 
-本次构建不包含 ADB 部署、KPM 加载、手机重启、system_server 注入、改 `/data/system`／`/data/app`、清数据或 App 安装卸载。
+手机交付使用四个简名 `server16`、`server17`、`zygisk_gadget16.zip`、`zygisk_gadget17.zip`，以及独立 KPM 文件；Zygisk 安装、KPM 加载、手机重启与 system_server 注入不随文件推送执行。
 
 ## 本地检查
 

@@ -2,6 +2,14 @@
 
 记录日期：2026-11-07。
 
+## 2026-11-07 E 轮完整可读段字符串改造（实施中）
+
+基线提交 `a8c907f212ffa588223de8bb8598302e4612e394`、成功 run 42353264303 的四简名产品已完成手机替换与 native 验收。E 轮新增检测按全部 PF_R/PT_LOAD 的 `p_filesz` 枚举 ASCII、每片最多 256 字节，大小写不敏感匹配 `frida`，21 次匹配回调写共享原因码。四完整内嵌 Agent 基线为 336/336/288/292 次命中；原 ARM64 捕获回放为 2714 回调、21 命中，与前 2 MiB 校准一致。
+
+本轮将运行时功能字符串和 gumjs 嵌入资源存为编码字节，使用时恢复原字节到 heap。Android 编译入口固定为两版 releng/env_android.py 的 Meson C/C++ compiler 数组前缀，兼容架构由同一环境重新生成；真实 target/common_flags/sysroot、wire/API、GType/name/nick 和资源长度保持。新报告 schema 4 拒绝旧 schema 3 复用，Agent/Gadget 全部可读 PT_LOAD 的匹配回调必须少于 21，server 内嵌两架构分别校验。源码转换报告与离线计数不是功能或目标 App 成功证明。
+
+目前完整本地回归 262 项，259 通过、3 跳过（Windows 符号链接权限两项、本机缺 valac 一项）；后续包装器专项增加失败 JSON 保留及三个精确嵌入 ELF 资源源的 passthrough，分别复测。编码器 24 项包含实际 host C/C++ 执行，包装器还核验 NDK r25.2 的 arm64/armv7 对象编译；完整可读段专项 7/7、ELF 专项 20/20、生成与构建约束 10/10 通过。KPM `1.1.0` 的全局版本曾完成编译、三组 Unicorn 和独立哈希核验，尚未推送；用户最新要求改为读取者或调用者 `UID > 10000`，正在实施 `1.1.1` 并重新编译、测试。两参考源码已核对：pandahide 全局，xiaojiahide 读取者 `UID > 10000`；nianchu 按最新要求采用后者的范围门槛，仍精确保留记录并改写目标路径。手机只读观察到五个候选符号名称，地址为零；不据此推定 ABI、实际 hook 或加载能力。当前新 Frida 完整构建与手机替换尚未完成；system_server 根因调查保持暂停。
+
 ## 2026-11-07 raw Agent 名称与动态字符串残留修复
 
 修复基线提交 `90e85c12157314dafbfdaffaf565e0bd61a0e592`，run 42345534583 已成功构建并推送四份简名产物；CI 201 项回归、真实 Vala/GLib 契约及手机两版直接 sleep native Agent/RPC/Interceptor/Memory/resume/unload-detach 通过。该版本的活动 SONAME 已为 `libnianchu-agent-raw.so`，但 LIEF 重建后 `.dynstr` 尾部保留 `libfrida-agent-raw.so`。16 arm64 旧完整串偏移 `0x3C4F`，应用子串命中 `0x3C52`；16 arm32 为 `0x2C61`，17 arm64/arm32 为 `0x38E7`/`0x3009`。旧报告记录残留但未要求归零，因此这些通过记录不证明旧 raw 签名已消除。

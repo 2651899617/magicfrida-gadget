@@ -915,6 +915,18 @@
         }
       ],
       "optional": {}
+    },
+    {
+      "path": "releng/env_android.py",
+      "upstream_sha256": "33efcf33095441ce6b54f4074740acc66dec149e13abb8cedc2dc3cfeb1b37b4",
+      "edits": [
+        {
+          "old": "        raw_val = strv_to_meson(argv)\n        if identifier in {\"c\", \"cpp\"}:\n            raw_val += \" + common_flags\"\n",
+          "new": "        # NIANCHU: keep an argv prefix in Meson compiler arrays across regeneration.\n        if identifier in {\"c\", \"cpp\"} and environ.get(\"NIANCHU_STRING_OUTLINER\"):\n            argv = [environ[\"NIANCHU_STRING_OUTLINE_PYTHON\"], \"-I\",\n                    environ[\"NIANCHU_STRING_OUTLINE_COMPILER\"],\n                    \"--config\", environ[\"NIANCHU_STRING_OUTLINE_CONFIG\"],\n                    \"--language\", identifier, \"--build-root\", str(outdir), \"--\", *argv]\n\n        raw_val = strv_to_meson(argv)\n        if identifier in {\"c\", \"cpp\"}:\n            raw_val += \" + common_flags\"\n",
+          "count": 1
+        }
+      ],
+      "optional": {}
     }
   ]
 }

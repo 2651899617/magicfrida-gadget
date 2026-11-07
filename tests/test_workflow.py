@@ -36,7 +36,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
                 self.assertEqual(actual['default_features'], ['exit-monitor-off', 'signal-interposition-off',
                                                               'agent-entrypoint-rename', 'gadget-json-config'])
-                self.assertEqual(len(actual['files']), 50 if version.startswith('16.') else 55)
+                self.assertEqual(len(actual['files']), 51 if version.startswith('16.') else 56)
                 for feature in (None, *actual['features']):
                     name = (feature or 'compatible') + '.patch'
                     self.assertEqual((output / 'patches' / version / name).read_bytes(),
@@ -44,6 +44,47 @@ class WorkflowTests(unittest.TestCase):
                 for entry in actual['files']:
                     relative = Path('tests/fixtures') / version / entry['path']
                     self.assertEqual((output / relative).read_bytes(), (ROOT / relative).read_bytes())
+
+    def test_outline_android_compiler_arrays_are_pinned_and_keep_target_flags(self):
+        expected_sha = {
+            '16.7.19': 'fddf203f9234a5604c275eeec32ac2795f2f0b9459312d8f2915ea66a6acc9c5',
+            '17.25.2': '33efcf33095441ce6b54f4074740acc66dec149e13abb8cedc2dc3cfeb1b37b4',
+        }
+        for version in patches.VERSIONS:
+            relative = 'releng/env_android.py'
+            base = (ROOT / 'tests/fixtures' / version / relative).read_bytes()
+            self.assertEqual(patches.digest(base), expected_sha[version])
+            text = default_source(version, relative)
+            ast.parse(text)
+            self.assertIn('if identifier in {"c", "cpp"} and environ.get("NIANCHU_STRING_OUTLINER"):', text)
+            self.assertIn('environ["NIANCHU_STRING_OUTLINE_PYTHON"], "-I"', text)
+            self.assertIn('"--config", environ["NIANCHU_STRING_OUTLINE_CONFIG"]', text)
+            self.assertIn('"--language", identifier, "--build-root", str(outdir), "--", *argv', text)
+            self.assertIn('raw_val += " + common_flags"', text)
+            self.assertIn('"-target",', text)
+            self.assertEqual(text.count('NIANCHU_STRING_OUTLINER'), 1)
+            self.assertIn('NDK_REQUIRED = ' + ('25' if version.startswith('16.') else '29'), text)
+
+    def test_outline_prepare_and_compiler_gates_precede_make_and_collect(self):
+        text = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')
+        for pin in ('tree-sitter==0.25.2', 'tree-sitter-c==0.24.2', 'tree-sitter-cpp==0.23.4'):
+            self.assertEqual(text.count(pin), 2)
+        prepare = text.index('- name: Prepare isolated string outlining compiler')
+        configure = text.index('- name: Configure Android arm64 server and Gadget')
+        validate = text.index('- name: Check persistent Android compiler arrays')
+        build = text.index('- name: Build nianchu server and modified auto-init Gadget')
+        collect = text.index('- name: Verify compatible source and collect both final targets')
+        self.assertLess(prepare, configure)
+        self.assertLess(configure, validate)
+        self.assertLess(validate, build)
+        self.assertLess(build, collect)
+        self.assertIn('--state-dir "$GITHUB_WORKSPACE/outline-state"', text)
+        self.assertIn('outline-state/reports/', text)
+        self.assertIn('NIANCHU_STRING_OUTLINER=$GITHUB_WORKSPACE/scripts/outline_elf_strings.py', text)
+        gate = text[validate:build]
+        self.assertIn('--build "$GITHUB_WORKSPACE/frida-src/build"', gate)
+        for unwanted in ('--source', '--python', '--outliner'):
+            self.assertNotIn(unwanted, gate)
 
     def test_git_preserves_entrypoint_patch_bytes(self):
         for version in ('16.7.19', '17.25.2'):

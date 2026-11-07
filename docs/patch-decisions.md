@@ -2,6 +2,14 @@
 
 仅以 `E:/frida魔改/fridaneed/最新的frida内容/anti-frida.py` 作为该脚本的采用参考；旧副本不重复登记。用户提供的实践脚本、三套 patch 和文章均按固定源码的适用性、冲突及创建/消费者联动判断，不因使用 LIEF、字符串替换或功能裁剪的形式而整体排除。这里区分“参考已验证”“本项目源码已迁移”“本项目编译/运行已验证”。
 
+## 2026-11-07 E 轮完整可读段编码改造
+
+- 编译期处理 core/gum 的预处理 C/C++ 字符串及指定 `gumjs_*_bytecode/source_code/source_map` 数字资源。AST 确认字符串上下文和静态字段；编码字节存于 ELF，原值在 heap 通过 `g_malloc`、`g_once_init_enter/leave` 恢复并保持生命周期。file-static 表由 priority 101 constructor 修复具体字段，function-local static 表在声明后一次性修复；保留地址型 source_tag、原 GType/enum name/nick、DBus/RPC/API 和资源长度、`sizeof`。不安全或未支持的上下文保留并记录原因，最终预算仍必须通过。
+- 固定 `tree-sitter==0.25.2`、`tree-sitter-c==0.24.2`、`tree-sitter-cpp==0.23.4`。两版 pinned `releng/env_android.py` 把外置 Python `-I` wrapper 放入 Meson C/C++ compiler arrays，兼容架构保留同样环境；真实编译器先 `-E -P`，最终用 `cpp-output/c++-cpp-output` 防止宏与 forced header 再次展开。原 source/header 依赖和目标选项保留，原源码 SHA/mode 不变，工具 SHA 漂移拒绝。每 TU 保存 JSON，不保留临时预处理源。
+- schema 4 对最终 ELF 重新执行 E 轮的完整 PF_R/PT_LOAD、`p_filesz`、ASCII 0x20–0x7e、每片最多 256 字节的枚举。匹配大小写不敏感 `frida`，一个 callback 内多个出现计一次，候选起点严格小于段末减 4。Agent/Gadget 必须少于 21 次；server 的 arm64、arm32 内嵌 Agent 分别核验。旧 schema 3 与旧高计数产品拒绝复用。
+- 原缓存 SDK 中的星期文本、安装路径、libtcc 版本与部分序列化版本字段仍可能存在。它们由最终完整计数报告列出；不把 wrapper 的转换数量当作最终剩余值，不改普通 `Friday`，不对 QuickJS bytecode 逐串替换。
+- KPM 为独立 `nianchu-ptrace` 工程。按用户最新要求，`1.1.1` 对当前读取者或调用者 `UID > 10000` 生效，maps、TracerPid 和 TRACEME 统一门控；UID 10000、root、shell 保留原行为，没有目标 PID/UID 名单。maps 精确将 `/memfd:nianchu-cache` 显示为 `/nianchu-cache`，保留可选 deleted 后缀、数字字段与真实 VMA/vm_file。已核对 xiaojiahide 的读取者 UID 条件和 pandahide 的全局实现；采用调用局部 count 快照和新增输出检查，并补齐边界、能力及回调生命周期核验。手机推送与内核加载分别核验。
+
 ## 2026-11-07 raw Agent 库名与废弃动态字符串修复
 
 - run 42345534583 的活动 SONAME 已改为 `libnianchu-agent-raw.so`，应用命中的 `frida-agent-raw.so` 是 `.dynstr` 尾部旧名；四个实际 Agent 各有一处。旧 schema 2 虽记录残留，却没有归零门槛，本节补齐这个缺口。
