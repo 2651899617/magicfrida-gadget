@@ -30,7 +30,7 @@ Android arm64 自有源码构建工程，面向自有或已明确授权的测试
 
 默认 recipe 按参考 patch 开启 `exit-monitor-off`、`signal-interposition-off`、`agent-entrypoint-rename` 和 `gadget-json-config`。server 默认资源目录与 agent 前缀使用 UUID；helper、socket、memfd 和初始化品牌使用 `nianchu`。RPC 标记通过双层 Base64 解码生成，线上协议值仍为 `frida:rpc`；Droidy/ADB 对参考 patch 指定的 OPEN/CLSE/WRTE 分支执行 break。Linux 临时目录返回值按参考改为 `/system/lib64`，其设备权限与运行影响尚待实机验证。系统 Python 和现有 frida.exe 保持原状。
 
-两版 pinned guard 已扩展到 **50／55** 份文件，涵盖 agent ELF 最终输出与 compat 消费者、embed-agent/embed-helper 的 ELF 重写钩子，以及 Gadget 文章的构建名、生成头、监听标签、Droidy 暂存和 JSON 配置查找。新增代码尚未进行本轮 Android 构建；旧 run 41951726835 的成功记录只适用于该 run 的源码。
+两版 pinned guard 为 **50／55** 份文件。基线提交 `764950b6865cbaf94e81177a753250a04d5bd670` 的 run 41980419791 已完成两版完整构建；2026-11-07 增补内部标识改名与功能查询键保留，新构建和验证记录另见 `docs/STATUS.md`。
 
 | feature | 当前默认与作用 |
 |---|---|
@@ -50,7 +50,7 @@ python -I -B scripts/apply_patches.py --source <固定完整Frida源码根目录
 
 16 bundled Java bridge 6.3.9 已增加编译前参考 patch hook，移除 PrettyMethod hook；17 外置 7.0.13 使用独立 patch/build 脚本生成 bundle。它们与下节 `direct-art-gc` 实验是两套不同 profile，测试和产物报告分别记录。
 
-`patches/rename.py` 现实现参考 ELF 批量改写，固定 LIEF **0.17.6**：修改符号中的 `frida/FRIDA`、四类 rodata 标记，以及参考脚本列出的线程/路径/ART 字符串；作者固定 `libwzdnb-agent` 品牌改用 `libnianchu-agent`。字符串随机替换保持等长，ELF 构建器处理动态字符串长度变化，并独立检查 GNU/SysV hash 查找。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 时仍是只读审计。静态检查与改写报告不等于 Android 动态加载、协议或 Java 功能通过。
+`patches/rename.py` 使用固定 LIEF **0.17.6** 和 schema 2 报告：私有 `StopReason` 从源码生成 `NianchuAgentStopReason`，枚举数值、value_name 和 nick 保持；经核对的内部类型及函数诊断使用跨版本、跨架构一致的等长映射 `Frida→Nnchu`／`frida→nnchu`。原始字符串处理限于完整 NUL 字符串和明确清单，普通 `Friday`、公开 Frida API/DBus 类型、`GDBusProxy`、`GumScript`、`GLib-GIO`、ART 查询键、`./lib/android` 和 `FRIDA_V8_EXTRA_FLAGS` 保留。取消通用 `gadget` 子串替换，Zygisk 入口稳定为 `nianchu_gadget_init`。符号表仍使用 LIEF 改写并独立核 GNU/SysV hash；嵌入 Agent/helper 在资源编译前改写，外层 server 不改嵌入 ELF。collector 强制核 arm64/arm32 Agent 的入口、类型改名和残留，未通过就不发布。`--rewrite --kind agent|helper|server|gadget --report <报告>` 写回指定构建文件；不加 `--rewrite` 为只读审计。静态/host GLib 契约不等于 Android JS/Java、GC、异常和宿主业务验证。
 
 ## Java bridge 源码实验
 

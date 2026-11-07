@@ -52,7 +52,71 @@ def fixture(active_gnu=True):
     return elf.rebuild_gnu_hash(bytes(data))
 
 
+def identifier_fixture(tokens, nested=b''):
+    """Small real ELF layout with one allocated string section and optional asset."""
+    names = b'\0.shstrtab\0.rodata\0'
+    content = b'\0' + b'\0'.join(tokens) + b'\0'
+    offset, shoff = 256, 128
+    data = bytearray(offset + len(names) + len(content) + len(nested))
+    struct.pack_into('<16sHHIQQQIHHHHHH', data, 0,
+                     b'\x7fELF\x02\x01\x01' + b'\0' * 9,
+                     3, 183, 1, 0, 64, shoff, 0, 64, 56, 1, 64, 2, 1)
+    # A separate section-name table is appended before the two-table layout.
+    # Three sections need 192 bytes; place them after the string payload.
+    shoff = (len(data) + 7) & ~7
+    data.extend(b'\0' * (shoff + 3 * 64 - len(data)))
+    struct.pack_into('<Q', data, 40, shoff)
+    struct.pack_into('<H', data, 60, 3)
+    struct.pack_into('<IIQQQQQQ', data, 64, 1, 4, 0, 0, 0, shoff, shoff, 4096)
+    data[offset:offset + len(names)] = names
+    string_start = offset + len(names)
+    data[string_start:string_start + len(content)] = content
+    data[string_start + len(content):string_start + len(content) + len(nested)] = nested
+    struct.pack_into('<IIQQQQIIQQ', data, shoff + 64, 1, 3, 0, 0, offset, len(names), 0, 0, 1, 0)
+    struct.pack_into('<IIQQQQIIQQ', data, shoff + 128, names.index(b'.rodata'), 1, 2,
+                     string_start, string_start, len(content) + len(nested), 0, 0, 1, 0)
+    return bytes(data)
+
+
 class ElfRewriteTests(unittest.TestCase):
+    def test_internal_mapping_is_stable_bounded_and_preserves_public_contracts(self):
+        public = [b'Friday', b'FridaAgentSession', b'FridaScriptRuntime', b'FRIDA_SCRIPT_RUNTIME_QJS',
+                  *[name.encode() for name in elf.FUNCTIONAL_STRINGS]]
+        data = identifier_fixture([b'FridaAgentRunner', b'FridaAgentRunner',
+                                   b'prefixFridaAgentRunner', b'FridaAgentRunnerSuffix',
+                                   b'frida_agent_runner_close_all_sessions_co', *public])
+        output, records = elf.rewrite_identifiers(data)
+        self.assertEqual(len(output), len(data))
+        self.assertEqual(output.count(b'NnchuAgentRunner\0'), 2)
+        self.assertIn(b'prefixFridaAgentRunner\0', output)
+        self.assertIn(b'FridaAgentRunnerSuffix\0', output)
+        self.assertIn(b'nnchu_agent_runner_close_all_sessions_co\0', output)
+        for token in public:
+            self.assertEqual(output.count(token), data.count(token))
+        self.assertEqual(len(set(elf.TYPE_MAP.values())), len(elf.TYPE_MAP))
+        runner = next(item for item in records if item['old'] == 'FridaAgentRunner')
+        self.assertEqual(runner['count'], 2)
+        self.assertEqual(elf.rewrite_identifiers(output)[0], output)
+        for suffix in (b'version-16', b'version-17'):
+            self.assertEqual(elf.rewrite_identifiers(data + suffix)[0].count(b'NnchuAgentRunner\0'), 2)
+        self.assertNotIn('FridaAgentStopReason', elf.TYPE_MAP)
+
+    def test_identifier_pass_protects_embedded_payload_and_reports_source_miss(self):
+        nested = identifier_fixture([b'FridaAgentRunner', b'FridaAgentStopReason'])
+        data = identifier_fixture([b'FridaAgentRunner'], nested=nested)
+        output, records = elf.rewrite_identifiers(data)
+        self.assertEqual(elf.embedded_elf_ranges(data), elf.embedded_elf_ranges(output))
+        for start, stop in elf.embedded_elf_ranges(data):
+            self.assertEqual(data[start:stop], output[start:stop])
+        self.assertEqual(next(item for item in records if item['old'] == 'FridaAgentRunner')['count'], 1)
+        self.assertEqual(elf.identifier_audit(output)['source_old_occurrences']['FridaAgentStopReason'], 1)
+        with self.assertRaisesRegex(ValueError, 'embedded arm64 and arm32'):
+            elf.verify_embedded_agents(output)
+
+    def test_old_rewrite_report_profile_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'invalid ELF rewrite report'):
+            elf.validate_rewrite_report(fixture(), {'schema': 1, 'profile': 'nianchu-reference-elf'}, 'helper')
+
     def test_single_bucket_gnu_rebuild_preserves_symbol_indexes(self):
         data = fixture()
         before = elf.Layout(data).symbols[11]

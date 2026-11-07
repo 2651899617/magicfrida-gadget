@@ -277,6 +277,11 @@ frida_on_load (void)
             core_relative = relative.removeprefix('subprojects/frida-core/')
             if core_relative in entrypoint_files:
                 if core_relative == 'lib/agent/agent.vala':
+                    # Private numeric state: rename only the generated GType name.
+                    # Preserve the enum value names/nicks and C consumer prefix.
+                    changes.append(edit('\tprivate enum StopReason {',
+                        '\t[CCode (cname = "NianchuAgentStopReason", cprefix = "FRIDA_AGENT_STOP_REASON_", '
+                        'lower_case_cprefix = "frida_agent_stop_reason_")]\n\tprivate enum StopReason {'))
                     optional['agent-entrypoint-rename'] = [edit('\tpublic void main (string agent_parameters,',
                         '\t[CCode (cname = "nianchu_agent_main")]\n\tpublic void main (string agent_parameters,')]
                 else:

@@ -64,6 +64,21 @@ class PatchTests(unittest.TestCase):
             self.assertEqual(second['features'], effective)
             self.assertNotIn('applied', [item['status'] for item in second['files']])
 
+    def test_stop_reason_rename_preserves_private_enum_state_and_values(self):
+        declaration = '[CCode (cname = "NianchuAgentStopReason", cprefix = "FRIDA_AGENT_STOP_REASON_", '
+        declaration += 'lower_case_cprefix = "frida_agent_stop_reason_")]'
+        for version in patches.VERSIONS:
+            source = self.source(version)
+            patches.apply(source, version, self.directory / (version + '-types.json'))
+            relative = 'subprojects/frida-core/lib/agent/agent.vala'
+            actual = (source / relative).read_text(encoding='utf-8')
+            original = (ROOT / 'tests/fixtures' / version / relative).read_text(encoding='utf-8')
+            self.assertEqual(actual.count(declaration), 1)
+            self.assertIn(declaration + '\n\tprivate enum StopReason {\n\t\tUNLOAD,\n\t\tPROCESS_TRANSITION\n\t}', actual)
+            reconstructed = actual.replace('\t' + declaration + '\n', '')
+            reconstructed = reconstructed.replace('\t[CCode (cname = "nianchu_agent_main")]\n', '')
+            self.assertEqual(reconstructed, original)
+
     def test_selected_features_merges_mandatory_defaults_without_duplicates(self):
         for version in patches.VERSIONS:
             recipe = recipe_for(version)

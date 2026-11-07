@@ -350,7 +350,8 @@ class ArtifactTests(unittest.TestCase):
                     raise ValueError('invalid model rewrite report')
 
             with mock.patch.object(collector.elf, 'rewrite', side_effect=rewrite), \
-                    mock.patch.object(collector.elf, 'validate_rewrite_report', side_effect=validate):
+                    mock.patch.object(collector.elf, 'validate_rewrite_report', side_effect=validate), \
+                    mock.patch.object(collector.elf, 'verify_embedded_agents', return_value=[{'model': True}]):
                 report = collector.collect(context.build, version, context.root / 'out',
                                            context.source_path, context.patch_path, True)
             self.assertTrue(report['binary_modified'])
@@ -394,6 +395,17 @@ class ArtifactTests(unittest.TestCase):
                     write_json(manifest, wrong)
                     with self.assertRaises(ValueError):
                         builder.payload_from_manifest(manifest)
+
+    def test_rewritten_collection_rejects_unverified_embedded_agent(self):
+        context = self.collection_fixture('bad-agent')
+        with mock.patch.object(collector.elf, 'rewrite', side_effect=lambda data, kind: (data, {})), \
+                mock.patch.object(collector.elf, 'validate_rewrite_report'), \
+                mock.patch.object(collector.elf, 'verify_embedded_agents',
+                                  side_effect=ValueError('unpatched FridaAgentStopReason')):
+            with self.assertRaisesRegex(ValueError, 'unpatched FridaAgentStopReason'):
+                collector.collect(context.build, context.version, context.root / 'out',
+                                  context.source_path, context.patch_path, True)
+        self.assertFalse((context.root / 'out').exists())
 
     def test_single_applied_record_regression(self):
         context = self.collection_fixture()

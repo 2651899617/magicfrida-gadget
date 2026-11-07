@@ -1,6 +1,14 @@
 # 当前工程状态
 
-记录日期：2026-11-05。此文件区分源码、编译、下载完整性、安装格式与运行证据；不把旧第三方成品当成本轮交付。
+记录日期：2026-11-07。
+
+## 2026-11-07 内部标识与功能契约修复
+
+基线 HEAD `764950b6865cbaf94e81177a753250a04d5bd670`，成功构建 run 41980419791。用户实测的 `FridaAgentStopReason` 偏移 `0x185B72` 精确对应 16 版内嵌 arm64 Agent 的只读段；原规则漏掉首字母大写 `Frida`。两版私有枚举在固定源码 recipe 加入 CCode 注册名 `NianchuAgentStopReason`，保留 Vala 枚举名、0/1、常量前缀和 nick。内部实现类型及诊断字符串使用固定清单和完整 NUL 字符串匹配，等长映射 `Frida→Nnchu`／`frida→nnchu`，不改公开 Frida API/DBus 类型。公共 GLib/Gum 类型、日志域、ART 查询、JS import、枚举 value_name 和环境变量从原随机规则移除，重新编译恢复原值。通用 `gadget` 子串规则移除，模块入口稳定为 `nianchu_gadget_init`。
+
+改写报告升级 schema 2，旧报告拒绝复用。收集器检查两版 server 实际嵌入的 arm64/arm32 Agent：ELF 初始化导出、GNU/SysV hash、源码新类型存在、旧 StopReason 和清单内完整旧类型为零。CI checks 实际用 Vala 生成 C 并运行 host GLib 枚举/属性契约；host 测试不是 Android ART、JS/Java、GC/异常或 App 业务证据。本轮本地整套回归190项（2项Windows符号链接权限跳过，其余通过），最终62个内部类型与13个诊断标识的ELF专项12/12通过；Vala验证器专项11项（10通过，1因本机无valac跳过）。生成补丁一致性8/8、产物/模块31/31通过，`git diff --check`通过。CI真实Vala、双版Android构建、下载和四简名手机推送正在执行，完成后记录本轮身份及hash。
+
+以下 2026-11-05 内容为历史阶段记录，不表示当前工作树或当前产物状态。
 
 **当前未提交工作树正在实施参考 full patch，区别于下文已推送提交。** 两版 pinned guard 扩展为 50／55 份；默认启用退出监控停用、POSIX signal backend 停用、agent 入口改名及 Gadget JSON 配置，并补充 UUID 目录/agent、RPC 编码、memfd 标签、Droidy/ADB 分支、Java bridge PrettyMethod 补丁和嵌入前 ELF 改写钩子。collector 只改写发布副本，module builder 读取经校验报告中的初始化入口。当前完整离线回归 **183 项通过、2 项跳过**；跳过项是 Windows 无符号链接创建权限。另有 ELF 专项 7/7、artifact 30/30、workflow 8/8、补丁组合32/32、Gadget 9/9、Java bridge 13/13。四种两版 Gadget/zygisk ELF 均完成内存改写与报告验证；检查 GNU/SysV hash、初始化导出和嵌入 ELF 完整性。`git diff --check` 通过。尚无本工作树的 Android 编译、真实 npm bridge 构建或设备运行证据；旧 Actions 成功不代表此工作树已构建。
 

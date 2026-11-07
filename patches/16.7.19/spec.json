@@ -281,7 +281,13 @@
     {
       "path": "subprojects/frida-core/lib/agent/agent.vala",
       "upstream_sha256": "e7c285fb7f8cff34dd34d23d27e3ffe41c28edc8e7d46ecf5fb3aeec2107b78d",
-      "edits": [],
+      "edits": [
+        {
+          "old": "\tprivate enum StopReason {",
+          "new": "\t[CCode (cname = \"NianchuAgentStopReason\", cprefix = \"FRIDA_AGENT_STOP_REASON_\", lower_case_cprefix = \"frida_agent_stop_reason_\")]\n\tprivate enum StopReason {",
+          "count": 1
+        }
+      ],
       "optional": {
         "agent-entrypoint-rename": [
           {

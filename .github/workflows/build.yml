@@ -27,16 +27,19 @@ jobs:
           set -euo pipefail
           mkdir -p logs
           sudo apt-get update
-          sudo apt-get install -y python3-venv
+          sudo apt-get install -y python3-venv valac libglib2.0-dev build-essential pkg-config
           python3 -I -m venv "$GITHUB_WORKSPACE/.checks-venv"
           "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -m pip install 'lief==0.17.6'
           "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I -B -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee logs/regression.log
+          "$GITHUB_WORKSPACE/.checks-venv/bin/python3" -I scripts/verify_vala_stop_reason.py --out reports/vala-stop-reason 2>&1 | tee logs/vala-stop-reason.log
       - name: Keep regression log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nianchu-regression-${{ github.run_id }}
-          path: logs/
+          path: |
+            logs/
+            reports/vala-stop-reason/
           if-no-files-found: error
 
   build:

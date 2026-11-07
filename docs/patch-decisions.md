@@ -2,7 +2,17 @@
 
 仅以 `E:/frida魔改/fridaneed/最新的frida内容/anti-frida.py` 作为该脚本的采用参考；旧副本不重复登记。用户提供的实践脚本、三套 patch 和文章均按固定源码的适用性、冲突及创建/消费者联动判断，不因使用 LIEF、字符串替换或功能裁剪的形式而整体排除。这里区分“参考已验证”“本项目源码已迁移”“本项目编译/运行已验证”。
 
-## 2026-11-05 参考 patch 扩展（当前工作树）
+## 2026-11-07 功能兼容的内部标识修复
+
+本段取代下文旧 schema 1 的整文件随机字符串规则，基于成功 run 41980419791 的 `764950b…` 修复：
+
+- 两版 `lib/agent/agent.vala` 私有 StopReason 使用 `NianchuAgentStopReason` 注册名；保留数值、常量名、nick 和全部数值消费者。CCode 由 pinned generator/spec 生成，原 fixture 字节不改。
+- 改写器 schema 2 使用内部类型/诊断清单和完整 NUL 字符串匹配，固定等长前缀 `Nnchu`／`nnchu`，相同类型在不同 ELF/版本/架构中保持同名；`Friday` 及前后附加字符不误改。StopReason 不走通用类型映射。
+- 保留 `GDBusProxy`、`GumScript`、`GLib-GIO`、ART resolver 键、`./lib/android`、枚举 value_name/nick、`FRIDA_V8_EXTRA_FLAGS` 和公开 Frida API/DBus 类型。移除全文件 `gadget` 通配规则，模块初始化导出稳定为 `nianchu_gadget_init`。诊断标签匹配限定 `.rodata`；符号表修改由 LIEF 和独立 hash 查找校验联动。
+- 本地已取得两版固定完整 core 归档，仅用于只读消费者核对；原稀疏 fixture 不冒充完整源码。内部实际消费者使用 typeof、数值和显式 JSON/DBus 键；未把外部反射按旧私有类型名查询视为受支持客户端协议。
+- collector 强制验证最终 server 内嵌 arm64/arm32 Agent 的实际入口、hash、新 StopReason 和旧选定类型残留。host Vala/GLib 契约测试覆盖0/1、value_name、nick、查询及属性读写；Android JS/Java、GC、异常和模块加载仍按独立运行证据报告。
+
+## 2026-11-05 参考 patch 扩展（历史工作树）
 
 用户要求按参考 patch 与最新版 anti-frida.py 实施，当前工作树已扩展默认 recipe；下文旧构建/实验记录按其注明的提交和 run 理解。
 

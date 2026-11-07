@@ -9,14 +9,64 @@ import random
 import struct
 import sys
 
-# These are protocol audit counters, not exclusions from the rewrite recipe.
+# Protocol and public lookup keys are preserved byte-for-byte by the raw pass.
 PROTECTED = (b're.frida', b're/frida', b'frida:rpc', b'frida_agent_main')
-RODATA_STRINGS = ('FridaScriptEngine', 'GLib-GIO', 'GDBusProxy', 'GumScript')
-PATH_STRINGS = (
-    'gum-js-loop', 'gmain', 'gdbus', 'frida-gadget', './lib/android', 'gadget',
+FUNCTIONAL_STRINGS = (
+    'GLib-GIO', 'GDBusProxy', 'GumScript', './lib/android',
     'art::JavaVMExt::AddGlobalRef', 'art::ClassLinker::VisitClassLoaders',
-    'pool_spawner', 'pool_spoiler', 'frida-inject',
+    'FRIDA_V8_EXTRA_FLAGS', 'FRIDA_AGENT_STOP_REASON_UNLOAD',
+    'FRIDA_AGENT_STOP_REASON_PROCESS_TRANSITION',
 )
+# These labels are never used as an ART resolver key or JS import path.
+RODATA_STRINGS = ()
+PATH_STRINGS = ('gum-js-loop', 'gmain', 'gdbus', 'frida-gadget',
+                'pool_spawner', 'pool_spoiler', 'frida-inject')
+# Explicit internal implementation types. Public Frida API/DBus types and
+# Gum/GLib types are intentionally absent. StopReason is renamed in Vala.
+INTERNAL_TYPES = (
+    'FridaAgentDirectConnection', 'FridaAgentEmulatedAgentSession',
+    'FridaAgentLiveAgentSession', 'FridaAgentRunner',
+    'FridaAgentRunnerTransitionRecoveryState', 'FridaAgentRunnerForkActor',
+    'FridaAgentRunnerNativeBridgeApi', 'FridaAgentRunnerNativeBridgeApiFlavor',
+    'FridaAgentMessageTransmitter', 'FridaAgentMessageTransmitterPendingMessage',
+    'FridaDirListCloaker', 'FridaDirListCloakerCloseDirListener',
+    'FridaDirListCloakerDirEntKind', 'FridaDirListCloakerOpenDirListener',
+    'FridaDirListCloakerReadDirListener', 'FridaDirListCloakerReadDirRListener',
+    'FridaDirListFilter', 'FridaExitMonitor', 'FridaExitMonitorPreparationState', 'FridaFDListCloaker',
+    'FridaFileDescriptorGuard', 'FridaFileDescriptorGuardCloseListener',
+    'FridaFileDescriptorTablePadder', 'FridaForkMonitor', 'FridaForkMonitorState',
+    'FridaForkMonitorChildRecoveryBehavior', 'FridaForkMonitorHookId',
+    'FridaGadgetBaseController', 'FridaGadgetClusterClient', 'FridaGadgetConfig',
+    'FridaGadgetConnectInteraction', 'FridaGadgetControlServer',
+    'FridaGadgetControlServerAuthenticationChannel', 'FridaGadgetControlServerControlChannel',
+    'FridaGadgetControlServerLiveAgentSession', 'FridaGadgetControlServerPeer',
+    'FridaGadgetController', 'FridaGadgetListenInteraction',
+    'FridaGadgetListenInteractionLoadBehavior', 'FridaGadgetLocation',
+    'FridaGadgetProcessFilter', 'FridaGadgetScript', 'FridaGadgetScriptChangeBehavior',
+    'FridaGadgetScriptConfig', 'FridaGadgetScriptDirectoryInteraction',
+    'FridaGadgetScriptDirectoryInteractionChangeBehavior', 'FridaGadgetScriptDirectoryRunner',
+    'FridaGadgetScriptInteraction', 'FridaGadgetScriptRunner', 'FridaGadgetSocketInteraction',
+    'FridaPortalClientLiveAgentSession', 'FridaRpcClientPendingResponse',
+    'FridaSpawnMonitor', 'FridaThreadCountCloaker', 'FridaThreadIgnoreScope',
+    'FridaThreadListCloaker', 'FridaThreadSuspendMonitor', 'FridaUnwindSitter',
+    'FridaScriptEngine', 'FridaScriptEngineScriptInstance',
+    'FridaScriptEngineScriptInstanceState', 'FridaGadgetState',
+)
+# Generated __func__ diagnostics, not exports, resolver keys or enum value_name.
+DIAGNOSTIC_STRINGS = (
+    'frida_agent_message_transmitter_close_co', 'frida_agent_message_transmitter_constructor',
+    'frida_agent_runner_close_all_sessions_co',
+    'frida_agent_runner_detach_and_steal_direct_dbus_connection',
+    'frida_base_agent_session_constructor', 'frida_base_agent_session_real_close_co',
+    'frida_detect_own_range_and_path', 'frida_get_executable_path',
+    'frida_portal_client_establish_connection_co', 'frida_portal_client_teardown_connection_co',
+    'frida_promise_impl_reject', 'frida_promise_impl_resolve', 'frida_unix_pipe_open',
+)
+TYPE_MAP = {name: 'Nnchu' + name[5:] for name in INTERNAL_TYPES}
+DIAGNOSTIC_MAP = {name: 'nnchu' + name[5:] for name in DIAGNOSTIC_STRINGS}
+SOURCE_TYPE_MAP = {'FridaAgentStopReason': 'NianchuAgentStopReason'}
+REPORT_SCHEMA = 2
+REPORT_PROFILE = 'nianchu-functional-identifiers-v2'
 CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 LIEF_VERSION = '0.17.6'
 KINDS = ('agent', 'helper', 'server', 'gadget')
@@ -303,6 +353,95 @@ def replace_equal(data, old, new):
     return bytes(output), count
 
 
+def string_occurrences(data, token, section_name='.rodata', layout=None, protected=None):
+    """Complete NUL-terminated strings; never substrings or nested payloads."""
+    layout = layout or Layout(data)
+    section = layout.by_name.get(section_name)
+    if section is None or section[1] == 8:
+        return []
+    start, limit = section[4], section[4] + section[5]
+    protected = embedded_elf_ranges(data) if protected is None else protected
+    needle = token.encode() + b'\0'
+    result = []
+    position = data.find(needle, start, limit)
+    while position != -1:
+        end = position + len(needle)
+        if ((position == start or data[position - 1] == 0)
+                and not any(position < stop and end > begin for begin, stop in protected)):
+            result.append(position)
+        position = data.find(needle, end, limit)
+    return result
+
+
+def rewrite_identifiers(data):
+    """Stable, injective mapping shared by all kinds, versions and architectures."""
+    mapping = {**TYPE_MAP, **DIAGNOSTIC_MAP}
+    if (len(set(mapping.values())) != len(mapping)
+            or set(mapping).intersection(mapping.values())
+            or any(len(old) != len(new) for old, new in mapping.items())):
+        raise ValueError('invalid internal identifier mapping')
+    output = bytearray(data)
+    layout, protected = Layout(data), embedded_elf_ranges(data)
+    records = []
+    for old, new in mapping.items():
+        positions = string_occurrences(data, old, layout=layout, protected=protected)
+        for position in positions:
+            output[position:position + len(old)] = new.encode()
+        records.append({'old': old, 'new': new, 'count': len(positions),
+                        'offsets': positions, 'scope': '.rodata-complete-NUL-string',
+                        'category': 'internal-type' if old in TYPE_MAP else 'diagnostic'})
+    return bytes(output), records
+
+
+def identifier_audit(data):
+    layout = Layout(data)
+    protected = embedded_elf_ranges(data)
+    occurrences = lambda name: len(string_occurrences(data, name, layout=layout, protected=protected))
+    section = layout.by_name.get('.rodata')
+    tokens = {}
+    if section:
+        blob = data[section[4]:section[4] + section[5]]
+        for item in blob.split(b'\0'):
+            if (item.startswith(b'Frida') and len(item) > 5 and 65 <= item[5] <= 90
+                    and all(65 <= c <= 90 or 97 <= c <= 122 or 48 <= c <= 57 or c == 95 for c in item)):
+                name = item.decode('ascii')
+                tokens[name] = tokens.get(name, 0) + 1
+    return {'mapping': TYPE_MAP, 'source_mapping': SOURCE_TYPE_MAP,
+            'complete_old_types': {name: occurrences(name) for name in TYPE_MAP},
+            'complete_new_types': {name: occurrences(new) for name, new in TYPE_MAP.items()},
+            'source_old_occurrences': {name: data.count(name.encode()) for name in SOURCE_TYPE_MAP},
+            'source_new_occurrences': {name: data.count(new.encode()) for name, new in SOURCE_TYPE_MAP.items()},
+            'remaining_types': dict(sorted(tokens.items())),
+            'functional_strings': {name: data.count(name.encode()) for name in FUNCTIONAL_STRINGS}}
+
+
+def verify_embedded_agents(data, expected_entry=AGENT_ENTRY, require_all=True):
+    """Check actual ELF exports and residuals inside both Android Agent assets."""
+    records = []
+    for start, stop in embedded_elf_ranges(data):
+        payload = data[start:stop]
+        layout = Layout(payload)
+        exports = [s for s in layout.symbols.get(11, [])
+                   if s['name'] in (AGENT_ENTRY, 'frida_agent_main') and s['index'] != 0]
+        if not exports:
+            continue
+        layout.exported(expected_entry)
+        audit_result = identifier_audit(payload)
+        if any(audit_result['source_old_occurrences'].values()):
+            raise ValueError('unpatched FridaAgentStopReason in embedded Agent at ' + hex(start))
+        if not audit_result['source_new_occurrences']['FridaAgentStopReason']:
+            raise ValueError('source GType rename missing in embedded Agent at ' + hex(start))
+        if any(audit_result['complete_old_types'].values()):
+            raise ValueError('old internal type remains in embedded Agent at ' + hex(start))
+        records.append({'offset': start, 'extent': stop - start, 'architecture':
+                        {183: 'aarch64', 40: 'arm', 62: 'x86_64', 3: 'x86'}[layout.machine],
+                        'sha256': digest(payload), 'initialization_symbol': expected_entry,
+                        'hash_tables': verify_hashes(payload), 'identifiers': audit_result})
+    if require_all and {item['architecture'] for item in records} != {'aarch64', 'arm'}:
+        raise ValueError('expected embedded arm64 and arm32 Agent payloads')
+    return records
+
+
 def rewrite(data, kind, seed=None):
     if kind not in KINDS:
         raise ValueError('unsupported rewrite kind')
@@ -333,30 +472,23 @@ def rewrite(data, kind, seed=None):
             entry.name = old.replace('libfrida-agent', 'libnianchu-agent')
             brands.append({'old': old, 'new': entry.name, 'scope': 'DT_SONAME'})
     rodata_changes = []
-    nested_ranges = embedded_elf_ranges(data)
-    for section in binary.sections:
-        if section.name != '.rodata':
-            continue
-        for token in RODATA_STRINGS:
-            value = sample(len(token))
-            for offset in section.search_all(token):
-                start = section.offset + offset
-                if any(start < stop and start + len(token) > begin for begin, stop in nested_ranges):
-                    continue
-                binary.patch_address(section.virtual_address + offset, list(value.encode()), lief.Binary.VA_TYPES.VA)
-                rodata_changes.append({'old': token, 'new': value, 'section': section.name,
-                                       'file_offset_before': section.offset + offset,
-                                       'virtual_address_before': section.virtual_address + offset})
     libraries = list(binary.libraries)
     config = lief.ELF.Builder.config_t()
     stage = binary.write_to_bytes(config)
+    functional_before = identifier_audit(stage)['functional_strings']
+    stage, identifier_changes = rewrite_identifiers(stage)
     path_changes = []
     for token in PATH_STRINGS:
         value = sample(len(token))
-        stage, count = replace_equal(stage, token.encode(), value.encode())
-        path_changes.append({'old': token, 'new': value, 'count': count, 'scope': 'whole-ELF-equal-length'})
-    # Whole-file replacements can touch .dynstr/.strtab. Parse and rebuild
-    # afterwards so GNU/SysV hashes and relocation symbol indexes agree.
+        positions = string_occurrences(stage, token)
+        updated = bytearray(stage)
+        for position in positions:
+            updated[position:position + len(token)] = value.encode()
+        stage = bytes(updated)
+        path_changes.append({'old': token, 'new': value, 'count': len(positions),
+                             'scope': '.rodata-complete-NUL-label'})
+    # Symbol edits use LIEF's table builder; raw data edits are equal-length.
+    # Rebuild active hashes without changing relocation symbol indexes.
     rebuilt = lief.ELF.parse(stage)
     if rebuilt is None:
         raise ValueError('LIEF parse after raw rewrite failed')
@@ -370,8 +502,6 @@ def rewrite(data, kind, seed=None):
     original_init = GADGET_ENTRY if kind == 'gadget' else AGENT_ENTRY if kind == 'agent' else None
     init = original_init
     if init:
-        for item in path_changes:
-            init = init.replace(item['old'], item['new'])
         if kind == 'agent':
             Layout(output).exported(init)
         elif any(s.name == GADGET_ENTRY for s in binary.dynamic_symbols):
@@ -381,19 +511,28 @@ def rewrite(data, kind, seed=None):
     for old, new in symbol_map.items():
         if any(s.name == old for s in final.symbols):
             raise ValueError('old renamed symbol remains: ' + old)
-    report = {'schema': 1, 'profile': 'nianchu-reference-elf', 'kind': kind,
+    identifiers = identifier_audit(output)
+    if identifiers['functional_strings'] != functional_before:
+        raise ValueError('public lookup/enum/environment strings changed')
+    nested_before = [data[start:stop] for start, stop in embedded_elf_ranges(data)]
+    nested_after = [output[start:stop] for start, stop in embedded_elf_ranges(output)]
+    if nested_after != nested_before:
+        raise ValueError('outer rewrite changed an embedded ELF payload')
+    report = {'schema': REPORT_SCHEMA, 'profile': REPORT_PROFILE, 'kind': kind,
               'lief_version': LIEF_VERSION, 'seed': seed, 'before': before, 'after': after,
               'binary_modified': data != output, 'random_symbol_token': random_name,
               'symbols': symbol_changes, 'rodata': rodata_changes, 'raw_strings': path_changes,
+              'identifiers': identifiers, 'identifier_changes': identifier_changes,
+              'functional_strings_before': functional_before,
               'brand_strings': brands, 'hash_tables': hashes, 'initialization_symbol': init,
               'needed': libraries, 'runtime_tested': False,
               'nested_elf_ranges': embedded_elf_ranges(data),
-              'residual_markers': {s: output.count(s.encode()) for s in (*RODATA_STRINGS, *PATH_STRINGS, 'libfrida-agent')}}
+              'residual_markers': {s: output.count(s.encode()) for s in (*TYPE_MAP, *SOURCE_TYPE_MAP, *PATH_STRINGS, 'libfrida-agent')}}
     return output, report
 
 
 def validate_rewrite_report(data, report, kind):
-    if (not isinstance(report, dict) or report.get('schema') != 1 or report.get('profile') != 'nianchu-reference-elf'
+    if (not isinstance(report, dict) or report.get('schema') != REPORT_SCHEMA or report.get('profile') != REPORT_PROFILE
             or report.get('kind') != kind or report.get('lief_version') != LIEF_VERSION
             or report.get('runtime_tested') is not False or report.get('binary_modified') is not True):
         raise ValueError('invalid ELF rewrite report')
@@ -418,8 +557,6 @@ def validate_rewrite_report(data, report, kind):
     if kind == 'agent' and init != AGENT_ENTRY:
         raise ValueError('agent initialization symbol mismatch')
     expected_gadget = GADGET_ENTRY
-    for item in raw:
-        expected_gadget = expected_gadget.replace(item['old'], item['new'])
     if kind == 'gadget':
         exports = [s for s in layout.symbols.get(11, []) if s['name'] == expected_gadget and s['index'] != 0]
         if init != (expected_gadget if exports else None):
@@ -432,18 +569,38 @@ def validate_rewrite_report(data, report, kind):
     parsed = lief.ELF.parse(data)
     if parsed is None or report.get('needed') != list(parsed.libraries):
         raise ValueError('ELF dependency report mismatch')
-    residual = {s: data.count(s.encode()) for s in (*RODATA_STRINGS, *PATH_STRINGS, 'libfrida-agent')}
+    residual = {s: data.count(s.encode()) for s in (*TYPE_MAP, *SOURCE_TYPE_MAP, *PATH_STRINGS, 'libfrida-agent')}
     if report.get('residual_markers') != residual:
         raise ValueError('ELF residual marker report mismatch')
-    if not isinstance(report.get('symbols'), list) or not isinstance(report.get('rodata'), list):
+    identifiers = identifier_audit(data)
+    if (report.get('identifiers') != identifiers
+            or report.get('functional_strings_before') != identifiers['functional_strings']):
+        raise ValueError('identifier or functional lookup contract mismatch')
+    changes = report.get('identifier_changes')
+    mapping = {**TYPE_MAP, **DIAGNOSTIC_MAP}
+    if not isinstance(changes, list) or [item.get('old') for item in changes] != list(mapping):
+        raise ValueError('incomplete internal identifier mapping')
+    protected = embedded_elf_ranges(data)
+    for item in changes:
+        old = item['old']
+        offsets = item.get('offsets')
+        if (item.get('new') != mapping[old] or type(item.get('count')) is not int
+                or item['count'] < 0 or not isinstance(offsets, list)
+                or len(offsets) != item['count'] or any(type(offset) is not int or offset < 0 for offset in offsets)
+                or item.get('scope') != '.rodata-complete-NUL-string'
+                or item.get('category') != ('internal-type' if old in TYPE_MAP else 'diagnostic')):
+            raise ValueError('invalid internal identifier rewrite record')
+        if string_occurrences(data, old, layout=layout, protected=protected):
+            raise ValueError('complete old internal identifier remains: ' + old)
+        if len(string_occurrences(data, mapping[old], layout=layout, protected=protected)) < item['count']:
+            raise ValueError('rewritten internal identifier missing: ' + old)
+    if not isinstance(report.get('symbols'), list) or report.get('rodata') != []:
         raise ValueError('invalid rewrite records')
     final_names = {s.name for s in parsed.symbols}
     for item in report['symbols']:
         if not isinstance(item, dict) or not isinstance(item.get('new'), str):
             raise ValueError('invalid symbol rewrite record')
         name = item['new']
-        for replacement in raw:
-            name = name.replace(replacement['old'], replacement['new'])
         if name not in final_names:
             raise ValueError('rewritten symbol missing: ' + name)
     return report

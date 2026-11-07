@@ -194,6 +194,16 @@
  
  #if defined (HAVE_LINUX) && defined (HAVE_GLIBC)
    gum_libdl_prevent_unload ();
+--- a/subprojects/frida-core/lib/agent/agent.vala
++++ b/subprojects/frida-core/lib/agent/agent.vala
+@@ -8,6 +8,7 @@
+ 			Runner.resume_after_transition (ref unload_policy, injector_state);
+ 	}
+ 
++	[CCode (cname = "NianchuAgentStopReason", cprefix = "FRIDA_AGENT_STOP_REASON_", lower_case_cprefix = "frida_agent_stop_reason_")]
+ 	private enum StopReason {
+ 		UNLOAD,
+ 		PROCESS_TRANSITION
 --- a/subprojects/frida-core/src/frida-glue.c
 +++ b/subprojects/frida-core/src/frida-glue.c
 @@ -56,11 +56,13 @@

@@ -168,11 +168,15 @@ def collect(build_dir, version, out, source_report, patch_report, rewrite_elf=Fa
             elf.validate_rewrite_report(data, rewrite_report, kind)
         info = elf.audit(data)
         renamed_entry = 'agent-entrypoint-rename' in patches['features']
+        embedded_agents = None
+        if kind == 'server' and rewrite_elf:
+            embedded_agents = elf.verify_embedded_agents(data, elf.AGENT_ENTRY)
+            info['embedded_agents'] = embedded_agents
         info['agent_entrypoint'] = {
             'symbol': ('nianchu_agent_main' if renamed_entry else 'frida_agent_main') if kind == 'server' else None,
             'scope': 'embedded-agent' if kind == 'server' else 'not-applicable-gadget',
             'source_contract': 'verified' if kind == 'server' else 'not-applicable',
-            'final_symbol_lookup': 'not-tested' if kind == 'server' else 'not-applicable',
+            'final_symbol_lookup': ('verified' if embedded_agents is not None else 'not-tested') if kind == 'server' else 'not-applicable',
         }
         if rewrite_report is not None:
             info['elf_rewrite'] = rewrite_report
