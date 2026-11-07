@@ -70,10 +70,11 @@ _TOKEN_RE = re.compile(rb'''(?P<space>\s+)|(?P<comment>/\*[\s\S]*?\*/|//(?:\\\r?
     |(?P<number>[0-9][A-Za-z_0-9.']*)|(?P<punct>[\s\S])''', re.X)
 
 
-def _lex(source):
+def _lex(source, include_directives=False):
     """Significant preprocessing tokens; never scan keywords inside literals."""
     tokens = []
     i = 0
+    directive_prefix = True
     while i < len(source):
         match = _TOKEN_RE.match(source, i)
         kind, end = match.lastgroup, match.end()
@@ -85,20 +86,26 @@ def _lex(source):
             else:
                 closing = source.find(b')' + delimiter + b'"', opening + 1)
                 kind, end = ('invalid', len(source)) if closing == -1 else ('string', closing + len(delimiter) + 2)
-        elif kind == 'punct' and source[i:i + 1] == b'#':
-            line = source.rfind(b'\n', 0, i) + 1
-            if not source[line:i].strip():
-                # Leave directives intact for validate_input(), but do not
-                # normalize filenames, #defines, or pragmas as compiler tokens.
-                end = source.find(b'\n', end)
-                end = len(source) if end == -1 else end + 1
-                while source[i:end].rstrip(b'\r\n').endswith(b'\\') and end < len(source):
-                    following = source.find(b'\n', end)
-                    end = len(source) if following == -1 else following + 1
-                kind = 'directive'
+        elif kind == 'punct' and source[i:i + 1] == b'#' and directive_prefix:
+            # Leave real directives intact for validate_input(), including a
+            # line-leading comment/whitespace prefix.  A # inside a comment,
+            # ordinary literal or multiline raw literal is never a directive.
+            end = source.find(b'\n', end)
+            end = len(source) if end == -1 else end + 1
+            while source[i:end].rstrip(b'\r\n').endswith(b'\\') and end < len(source):
+                following = source.find(b'\n', end)
+                end = len(source) if following == -1 else following + 1
+            kind = 'directive'
         elif kind == 'punct' and source[i:i + 1] in {b'"', b"'"}:
             kind = 'invalid'
-        if kind not in {'space', 'comment', 'directive'}:
+        if kind in {'space', 'comment'}:
+            if b'\n' in source[i:end]:
+                directive_prefix = True
+        elif kind == 'directive':
+            directive_prefix = True
+        else:
+            directive_prefix = False
+        if kind not in {'space', 'comment', 'directive'} or (include_directives and kind == 'directive'):
             tokens.append(_Token(kind, i, end, source[i:end]))
         i = end
     return tokens
@@ -133,6 +140,60 @@ def _padded(original, replacement=b''):
 
 _LINE_MARKER = re.compile(rb'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+("(?:\\[^\r\n]|[^"\\\r\n])*")((?:[ \t]+[0-9]+)*)[ \t]*(?:\r?\n|$)')
 _SYNTHETIC_ORIGIN = b'#line 1 "<nianchu-outline-generated>"\n'
+# Labels must be identifier tokens for both GNU C and Clang C/C++.  Reserved
+# compiler spellings (__foo / _Foo) and either language's keywords can otherwise
+# be ignored by Clang while GCC still performs the modeled stack operation.
+_PACK_LABEL_KEYWORDS = frozenset(rb'''
+    alignas alignof and and_eq asm atomic_cancel atomic_commit atomic_noexcept
+    auto bitand bitor bool break case catch char char8_t char16_t char32_t class
+    compl concept const consteval constexpr constinit const_cast continue
+    co_await co_return co_yield decltype default delete do double dynamic_cast
+    else enum explicit export extern false final float for friend goto if import
+    inline int long module mutable namespace new noexcept not not_eq nullptr
+    operator or or_eq override private protected public reflexpr register
+    reinterpret_cast requires restrict return short signed sizeof static
+    static_assert static_cast struct switch synchronized template this
+    thread_local throw transactional_safe transactional_safe_dynamic true try
+    typedef typeid typename typeof typeof_unqual union unsigned using virtual
+    void volatile wchar_t while xor xor_eq push pop
+'''.split())
+
+
+def _packing_directive(raw):
+    """Recognize literal GNU/Clang pack forms without rewriting their bytes."""
+    match = re.fullmatch(rb'\s*#\s*pragma\s+pack\s*\(([^()\r\n]*)\)\s*', raw)
+    if match is None:
+        return None
+    body = match.group(1).strip()
+    parts = [part.strip() for part in body.split(b',')] if body else []
+    alignments = {b'1', b'2', b'4', b'8', b'16'}
+    if not parts:
+        return {'action': 'reset', 'label': None, 'alignment': None}
+    if len(parts) == 1 and parts[0] in alignments:
+        return {'action': 'set', 'label': None, 'alignment': int(parts[0])}
+    if parts[0] not in {b'push', b'pop'} or len(parts) > 3:
+        return None
+    label, alignment = None, None
+    if len(parts) >= 2:
+        if parts[1] in alignments:
+            if len(parts) != 2:
+                return None
+            alignment = int(parts[1])
+        elif (re.fullmatch(rb'[A-Za-z_][A-Za-z_0-9]*', parts[1])
+                and parts[1] not in _PACK_LABEL_KEYWORDS
+                and not re.match(rb'(?:__|_[A-Z])', parts[1])):
+            label = parts[1].decode('ascii')
+            if len(parts) == 3:
+                if parts[2] not in alignments:
+                    return None
+                alignment = int(parts[2])
+        else:
+            return None
+    # GCC ignores pop with an alignment, while Clang applies it (and warns
+    # for pop,label,alignment).  Never model a compiler-dependent stack change.
+    if parts[0] == b'pop' and alignment is not None:
+        return None
+    return {'action': parts[0].decode('ascii'), 'label': label, 'alignment': alignment}
 
 
 def _origin_path(raw):
@@ -203,6 +264,7 @@ class _HeaderOrigins:
         self.ranges = []
         self.blocks = []
         self.symbols = set()
+        self.markers = []
         for root in roots:
             path = Path(root)
             if not path.is_absolute() or not path.is_dir():
@@ -217,15 +279,17 @@ class _HeaderOrigins:
         if not self.roots:
             self.view = source
             return
-        markers = list(_LINE_MARKER.finditer(source))
-        if not markers:
+        lexical = _lex(source, include_directives=True)
+        self.markers = [token for token in lexical
+                        if token.kind == 'directive' and _LINE_MARKER.fullmatch(token.value)]
+        if not self.markers:
             raise Unsupported('cpp_opaque_requires_line_markers')
         origin = None
         cursor = 0
-        for marker in markers:
-            self.add_block(cursor, marker.start(), origin)
-            origin = _origin_path(marker.group(2))
-            cursor = marker.end()
+        for marker in self.markers:
+            self.add_block(cursor, marker.start, origin)
+            origin = _origin_path(_LINE_MARKER.fullmatch(marker.value).group(2))
+            cursor = marker.end
         self.add_block(cursor, len(source), origin)
         shadow = bytearray(source)
         opening = {b'(': b')', b'[': b']', b'{': b'}'}
@@ -264,18 +328,15 @@ class _HeaderOrigins:
                     run_start = block['start']
                 run_end = block['end']
                 run_origins.add(block['origin'])
-                # Directives must remain visible to validate_input, so unknown
-                # pragmas/#defines cannot be smuggled through the boundary.
-                for line in re.finditer(rb'(?m)^[ \t]*#[^\r\n]*(?:\r?\n|$)', source[block['start']:block['end']]):
-                    begin = block['start'] + line.start()
-                    end = block['start'] + line.end()
-                    shadow[begin:end] = source[begin:end]
-                cursor = block['start']
-                for directive in re.finditer(rb'(?m)^[ \t]*#[^\r\n]*(?:\r?\n|$)', source[block['start']:block['end']]):
-                    begin = block['start'] + directive.start()
-                    shadow[cursor:begin] = _padded(source[cursor:begin])
-                    cursor = block['start'] + directive.end()
-                shadow[cursor:block['end']] = _padded(source[cursor:block['end']])
+                # Hide the whole external body, then restore only directives
+                # emitted by the lexical pass.  Line-shaped text in comments
+                # and raw strings must never change parser or packing state.
+                start, end = block['start'], block['end']
+                shadow[start:end] = _padded(source[start:end])
+                for directive in _lex(source[start:end], include_directives=True):
+                    if directive.kind == 'directive':
+                        begin, finish = start + directive.start, start + directive.end
+                        shadow[begin:finish] = source[begin:finish]
                 self.symbols.update(t.value for t in tokens if t.kind == 'identifier')
             for token in tokens:
                 if token.kind == 'punct' and token.value in opening:
@@ -344,8 +405,8 @@ class _ParserShadow:
         # a missing comma.  Audited line directives are parser trivia only;
         # their original bytes and physical origin remain in compiler output.
         if cpp_opaque_roots:
-            for marker in _LINE_MARKER.finditer(source):
-                self.replace(shadow, marker.start(), marker.end(), 'line-marker')
+            for marker in self.origins.markers:
+                self.replace(shadow, marker.start, marker.end, 'line-marker')
         typeops = []
         for i, token in enumerate(self.tokens):
             if token.kind != 'identifier':
@@ -878,7 +939,7 @@ def _marker_status(value):
 
 
 def _shape(kind='unknown', **kwargs):
-    result = dict(kind=kind, const=False, const_nodes=[], unsafe=None)
+    result = dict(kind=kind, const=False, const_nodes=[], unsafe=None, packing_dependent=False)
     result.update(kwargs)
     return result
 
@@ -911,6 +972,7 @@ class Transformer:
         self.type_records = {}
         self.type_cache = {}
         self.type_context = None
+        self.packing_ranges = []
         self.variables = []
         self.functions = {}
         self.initializer_map = {}
@@ -1123,6 +1185,12 @@ class Transformer:
     def _base_type(self, node):
         if node is None:
             return _shape()
+        body = (node.child_by_field_name('body')
+                if node.type in {'struct_specifier', 'union_specifier', 'class_specifier'} else None)
+        # Hidden compiler syntax may make the aggregate itself unknown, but
+        # cannot erase its by-value packing dependency from an outer object.
+        if body is not None and self.aggregate_packing_dependent(node, body):
+            return _shape(unsafe='aggregate_pragma_packing', packing_dependent=True)
         if self.shadow.within(node, {'typeof'}):
             return _shape(unsafe='compiler_inferred_type')
         if self.shadow.within(node, {'member-pointer'}) or node.id in self.shadow.type_contexts:
@@ -1163,6 +1231,8 @@ class Transformer:
                 return self.base_type(record['node']) if record is not None and record['node'] != node else _shape(unsafe='unresolved_aggregate_type')
             if node.type != 'struct_specifier':
                 return _shape(unsafe='union_or_class_layout')
+            if any(c.type == 'base_class_clause' for c in node.named_children):
+                return _shape(unsafe='nontrivial_cpp_aggregate')
             if self.attributes(node):
                 return _shape(unsafe='aggregate_attributes_or_packing')
             fields = []
@@ -1201,7 +1271,9 @@ class Transformer:
                     count = _integer(self.source[size.start_byte:size.end_byte])
                 except (Unsupported, ValueError, UnicodeError):
                     pass
-            return self.apply_declarator(_shape('array', element=base, count=count, size_node=size, unsafe=base.get('unsafe')), child)
+            return self.apply_declarator(_shape('array', element=base, count=count, size_node=size,
+                                                 unsafe=base.get('unsafe'),
+                                                 packing_dependent=base.get('packing_dependent', False)), child)
         if node.type in {'function_declarator', 'abstract_function_declarator'}:
             result = _shape('function', returns=base, parameters=node.child_by_field_name('parameters'))
             return self.apply_declarator(result, child)
@@ -1377,6 +1449,37 @@ class Transformer:
         if len(redeclarations) > 1:
             return [], 'const_storage_redeclaration'
         return nodes, None
+
+    def packing_problem(self, node):
+        return any(start < node.end_byte and node.start_byte < end
+                   for start, end in self.packing_ranges)
+
+    def aggregate_packing_dependent(self, node, body):
+        # Member and base types contribute their *object* layout.  Pointer and
+        # function declarators clear packing_dependent; arrays retain it.  This
+        # metadata must cross otherwise-unknown union/class/inheritance shells
+        # so a sibling pointer slot cannot bypass the aggregate packing policy.
+        if self.packing_problem(node):
+            return True
+        for clause in node.named_children:
+            if clause.type == 'base_class_clause':
+                for base in clause.named_children:
+                    if base.type != 'access_specifier' and self.base_type(base).get('packing_dependent'):
+                        return True
+        for field in body.named_children:
+            if field.type != 'field_declaration':
+                continue
+            if any(c.type == 'storage_class_specifier' and self.text(c) == 'static'
+                   for c in field.named_children):
+                continue
+            declarators = field.children_by_field_name('declarator')
+            if declarators:
+                if any(self.declared_type(field, declarator).get('packing_dependent')
+                       for declarator in declarators):
+                    return True
+            elif self.base_type(field.child_by_field_name('type')).get('packing_dependent'):
+                return True
+        return False
 
     def static_problem(self, variable):
         node = variable['node']
@@ -1856,6 +1959,55 @@ static const %(element)s * %(getter)s (void)
         suffix.append('\n'.join(constructor))
         return ('\n'.join(prelude) + '\n').encode(), ('\n' + '\n'.join(suffix) + '\n').encode()
 
+    def validate_packing(self, nodes):
+        """Track pack state in source order, including physical opaque headers.
+
+        A pragma affects aggregate definitions even when their static objects
+        appear after a pop.  Those shapes remain unknown; ordinary byte/pointer
+        objects and runtime expressions do not depend on member packing.
+        """
+        alignment, stack, cursor = None, [], 0
+        events = []
+        for node in sorted(nodes, key=lambda n: n.start_byte):
+            parsed = _packing_directive(self.source[node.start_byte:node.end_byte])
+            if parsed is None:
+                self.fail('unsupported_pragma_pack', self.text(node)[:120], node)
+            if alignment is not None and cursor < node.start_byte:
+                self.packing_ranges.append((cursor, node.start_byte))
+            action, label, value = parsed['action'], parsed['label'], parsed['alignment']
+            if action == 'push':
+                stack.append((label, alignment))
+                if value is not None:
+                    alignment = value
+            elif action == 'pop':
+                index = len(stack) - 1
+                if label is not None:
+                    index = next((i for i in range(len(stack) - 1, -1, -1)
+                                  if stack[i][0] == label), -1)
+                if index < 0:
+                    self.fail('pragma_pack_unmatched_pop', self.text(node)[:120], node)
+                alignment = stack[index][1]
+                del stack[index:]
+            elif action == 'set':
+                alignment = value
+            else:
+                alignment = None
+            cursor = node.end_byte
+            events.append(dict(self.location(node), **parsed,
+                               effective_alignment=alignment, stack_depth=len(stack)))
+        if alignment is not None and cursor < len(self.source):
+            self.packing_ranges.append((cursor, len(self.source)))
+        if events:
+            self.report['pragma_pack'] = {
+                'original_bytes_emitted': True,
+                'aggregate_slots': 'skipped_when_definition_overlaps_active_pack',
+                'events': events,
+                'active_ranges': [{'start_byte': start, 'end_byte': end}
+                                  for start, end in self.packing_ranges],
+                'final_alignment': alignment,
+                'remaining_stack_depth': len(stack),
+            }
+
     def validate_input(self):
         if self.root.has_error:
             errors = [n for n in _walk_all(self.root) if n.type == 'ERROR' or n.is_missing]
@@ -1863,6 +2015,7 @@ static const %(element)s * %(getter)s (void)
                 self.report['failures'].append(dict(self.location(node), reason='parse_error', detail=self.text(node)[:120],
                                                     context=self.source[max(0, node.start_byte - 160):node.end_byte + 160].decode('utf-8', errors='replace')[:440]))
             self.fail('input_does_not_parse')
+        packing_nodes = []
         for node in self.nodes:
             if not node.type.startswith('preproc_') or node.type in {'preproc_directive', 'preproc_arg'}:
                 continue
@@ -1870,14 +2023,18 @@ static const %(element)s * %(getter)s (void)
             if node.type == 'preproc_call':
                 if re.match(rb'^\s*#\s*(?:line\s+)?[0-9]+\s+"[^"\r\n]*"(?:\s+[0-9]+)*\s*$', raw):
                     continue
-                # Compiler-emitted diagnostic pragmas survive -E/-P, and do
-                # not define a macro or affect object layout.  All other
-                # directives (notably pack/attribute pragmas) stay fail-closed.
+                # Literal pack pragmas are retained for the semantic compiler
+                # and tracked separately so dependent aggregate slots stay
+                # unknown.  Other layout/macro directives remain fail-closed.
+                if _packing_directive(raw) is not None:
+                    packing_nodes.append(node)
+                    continue
                 if re.fullmatch(rb'\s*#\s*pragma\s+(?:GCC|clang)\s+diagnostic\s+(?:push|pop|(?:ignored|warning|error)\s+"-W[A-Za-z0-9_=+.,-]+")\s*', raw):
                     continue
                 if re.fullmatch(rb'\s*#\s*pragma\s+(?:GCC\s+system_header|clang\s+system_header|once)\s*', raw):
                     continue
             self.fail('input_not_fully_preprocessed', self.text(node)[:120], node)
+        self.validate_packing(packing_nodes)
         # AST parsing is not a substitute for the build's semantic compiler gate.
 
     def run(self):

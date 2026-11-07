@@ -624,16 +624,341 @@ const char *name(void){return "FridaBuiltinType";}
         self.assertEqual(report['parser_normalization']['kind_counts']['builtin-type'], 4)
         self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
 
-    def test_diagnostic_pragmas_allowed_but_layout_or_macro_directives_fail(self):
+    def test_diagnostic_pragmas_allowed_but_unknown_or_macro_directives_fail(self):
         pragmas = '#pragma clang diagnostic push\n#pragma clang diagnostic ignored "-Wdeprecated-declarations"\n#pragma clang diagnostic pop\n'
         output, report = self.transform(pragmas + GLIB_HOST + 'const char *f(void){return "FridaPragma";}')
         self.assertTrue(report['ok'])
         self.assertIn(pragmas.encode(), output)
-        for source in ('#pragma pack(push,1)\n', '#pragma clang attribute push (__attribute__((packed)), apply_to=record)\n',
+        for source in ('#pragma clang attribute push (__attribute__((packed)), apply_to=record)\n',
                        '#define _Nullable\n', '#pragma message("frida")\n'):
             with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
                 self.transform(source)
             self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_not_fully_preprocessed')
+
+    def test_pack_pragmas_preserve_layout_and_skip_static_packed_types_after_pop(self):
+        source = GLIB_HOST + r'''
+#pragma pack (push, 1)
+typedef struct Packed { unsigned char tag; const char *name; } Packed;
+#pragma pack(pop)
+static const Packed values[]={{7,"FridaPackedValue"}};
+static const char *safe="FridaPackedSafe";
+const char *name(void){return "FridaPackedRuntime";}
+int main(void) {
+  require(sizeof(Packed)==1+sizeof(const char *));
+  require(__builtin_offsetof(Packed,name)==1);
+  require(values[0].tag==7 && values[0].name[0]=='F' && values[0].name[5]=='P');
+  require(safe[0]=='F' && safe[11]=='S');
+  require(name()[0]=='F' && name()[11]=='R');
+  return 0;
+}
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                if language == 'cpp':
+                    size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+                    unit = source.replace('typedef unsigned long gsize;',
+                                          'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+                else:
+                    unit = source
+                output, report = self.transform(unit, language)
+                self.assertIn(b'#pragma pack (push, 1)\n', output)
+                self.assertIn(b'#pragma pack(pop)\n', output)
+                self.assertIn(b'static const Packed values[]={{7,"FridaPackedValue"}};', output)
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 2)
+                self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+                self.assertEqual([obj['paths'] for obj in report['static_objects']], [['']])
+                self.assertEqual([s['reason'] for s in report['skipped']], ['aggregate_pragma_packing'])
+                self.assertEqual(report['pragma_pack']['final_alignment'], None)
+                self.assertEqual(report['pragma_pack']['remaining_stack_depth'], 0)
+                self.assertTrue(report['pragma_pack']['original_bytes_emitted'])
+                self.compile_run(output, language)
+
+    def test_nested_pack_restore_default_types_and_resource_metadata(self):
+        source = GLIB_HOST + r'''
+#pragma pack(push,1)
+struct PackedOne { char tag; const char *name; };
+#pragma pack(push,2)
+struct PackedTwo { char tag; const char *name; };
+#pragma pack(pop)
+struct PackedAgain { char tag; const char *name; };
+#pragma pack(pop)
+struct Normal { char tag; const char *name; };
+static const struct PackedOne one={1,"FridaPackOne"};
+static const struct PackedTwo two={2,"FridaPackTwo"};
+static const struct PackedAgain again={3,"FridaPackAgain"};
+static const unsigned char gumjs_pack_bytecode[]={70,114,105,100,97};
+static const struct Normal normal={4,"FridaPackNormal"};
+struct Resource { unsigned long length; const unsigned char *bytes; };
+static const struct Resource resource={sizeof(gumjs_pack_bytecode),gumjs_pack_bytecode};
+int main(void) {
+  require(__builtin_offsetof(struct PackedOne,name)==1);
+  require(__builtin_offsetof(struct PackedTwo,name)==2);
+  require(__builtin_offsetof(struct PackedAgain,name)==1);
+  require(__builtin_offsetof(struct Normal,name)==sizeof(const char *));
+  require(one.tag==1 && two.tag==2 && again.tag==3 && normal.tag==4);
+  require(one.name[9]=='O' && two.name[9]=='T' && again.name[9]=='A' && normal.name[9]=='N');
+  require(resource.length==5 && resource.bytes[0]==70 && resource.bytes[4]==97);
+  return 0;
+}
+'''
+        output, report = self.transform(source)
+        self.assertEqual(report['summary']['resources_transformed'], 1)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assertEqual(report['summary']['expected_pointer_patches'], 2)
+        self.assertEqual({obj['name']: obj['paths'] for obj in report['static_objects']},
+                         {'normal': ['.name'], 'resource': ['.bytes']})
+        self.assertEqual([s['reason'] for s in report['skipped']], ['aggregate_pragma_packing'] * 3)
+        self.assertEqual([event['effective_alignment'] for event in report['pragma_pack']['events']], [1, 2, 1, None])
+        self.compile_run(output)
+
+    def test_pack_direct_settings_named_stack_and_reset_are_tracked(self):
+        cases = (
+            ('#pragma pack(1)\nstruct Packed{char tag;const char *name;};\n#pragma pack()\n', [1, None]),
+            ('#pragma pack(push,outer,1)\n#pragma pack(push,inner,2)\n'
+             'struct Packed{char tag;const char *name;};\n#pragma pack(pop,outer)\n', [1, 2, None]),
+            ('#pragma pack(push)\n#pragma pack(1)\n'
+             'struct Packed{char tag;const char *name;};\n#pragma pack(pop)\n', [None, 1, None]),
+        )
+        for pragmas, alignments in cases:
+            with self.subTest(pragmas=pragmas):
+                source = GLIB_HOST + pragmas + 'static const struct Packed value={1,"FridaPackSetting"};\n'
+                output, report = self.transform(source)
+                self.assertEqual(output, source.encode())
+                self.assertEqual(report['skipped'][0]['reason'], 'aggregate_pragma_packing')
+                self.assertEqual([event['effective_alignment'] for event in report['pragma_pack']['events']], alignments)
+                self.assertEqual(report['pragma_pack']['remaining_stack_depth'], 0)
+
+    def test_pack_unsafe_metadata_reference_skips_the_entire_numeric_resource(self):
+        source = GLIB_HOST + r'''
+static const unsigned char gumjs_pack_bytecode[]={70,114,105,100,97};
+#pragma pack(push,1)
+struct PackedResource{char tag;const unsigned char *bytes;};
+#pragma pack(pop)
+static const struct PackedResource metadata={1,gumjs_pack_bytecode};
+const unsigned char *bytes(void){return gumjs_pack_bytecode;}
+'''
+        output, report = self.transform(source)
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['summary']['resources_transformed'], 0)
+        self.assertEqual(report['skipped'][0]['reason'], 'resource_reference_aggregate_pragma_packing')
+
+    def test_unknown_pack_forms_and_unmatched_stack_fail_closed(self):
+        cases = (
+            ('#pragma pack(3)\n', 'input_not_fully_preprocessed'),
+            ('#pragma pack(push,,1)\n', 'input_not_fully_preprocessed'),
+            ('#pragma pack(push,1,2)\n', 'input_not_fully_preprocessed'),
+            ('#pragma pack(PACK_ALIGNMENT)\n', 'input_not_fully_preprocessed'),
+            ('#pragma pack(pop,4)\n', 'input_not_fully_preprocessed'),
+            ('#pragma pack(push,outer,1)\n#pragma pack(pop,outer,4)\n', 'input_not_fully_preprocessed'),
+            ('#pragma pack(pop)\n', 'pragma_pack_unmatched_pop'),
+            ('#pragma pack(push,outer,1)\n#pragma pack(pop,missing)\n', 'pragma_pack_unmatched_pop'),
+        )
+        for source, reason in cases:
+            with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source)
+            self.assertEqual(caught.exception.report['failures'][-1]['reason'], reason)
+
+    def test_pack_keyword_and_reserved_labels_fail_closed(self):
+        labels = ('int', 'class', 'bool', 'restrict', 'typeof', '__signed__',
+                  '__const__', '__typeof__', '_Nullable', '_Atomic', '__vendor')
+        for label in labels:
+            for language in ('c', 'cpp'):
+                source = ('#pragma clang diagnostic ignored "-Wignored-pragmas"\n'
+                          '#pragma clang diagnostic ignored "-Wpragma-pack"\n'
+                          '#pragma pack(push,%s,1)\n#pragma pack(push,2)\n'
+                          '#pragma pack(pop,%s)\n' % (label, label))
+                with self.subTest(label=label, language=language), self.assertRaises(outline.OutlineError) as caught:
+                    self.transform(source, language)
+                self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_not_fully_preprocessed')
+        for label in ('outer', 'normal', '_lower'):
+            source = '#pragma pack(push,%s,1)\n#pragma pack(pop,%s)\n' % (label, label)
+            output, report = self.transform(source)
+            self.assertEqual(output, source.encode())
+            self.assertEqual([e['effective_alignment'] for e in report['pragma_pack']['events']], [1, None])
+
+    def test_by_value_packing_dependency_crosses_aggregate_shells_and_arrays(self):
+        wrappers = (
+            ('typedef struct Wrapper{Child child;} Wrapper;', ('c', 'cpp')),
+            ('typedef union Wrapper{Child child;} Wrapper;', ('c', 'cpp')),
+            ('typedef struct Wrapper{Child children[2];} Wrapper;', ('c', 'cpp')),
+            ('typedef Child Children[2];typedef struct Wrapper{Children children;} Wrapper;', ('c', 'cpp')),
+            ('class Wrapper{public:Child child;};', ('cpp',)),
+            ('struct Wrapper:Child{};', ('cpp',)),
+        )
+        for wrapper, languages in wrappers:
+            for language in languages:
+                with self.subTest(wrapper=wrapper, language=language):
+                    source = GLIB_HOST + r'''
+#pragma pack(push,1)
+typedef struct Child{char tag;void *payload;} Child;
+#pragma pack(pop)
+''' + wrapper + r'''
+typedef struct Outer{char prefix;Wrapper wrapper;const char *text;} Outer;
+static const Outer value={1,{0},"FridaOuter"};
+int main(void){
+  require(sizeof(Child)==1+sizeof(void *));
+  require(__alignof__(Wrapper)==1);
+  require(__builtin_offsetof(Outer,wrapper)==1);
+  require(__builtin_offsetof(Outer,text)==
+      ((1+sizeof(Wrapper)+sizeof(void *)-1)/sizeof(void *))*sizeof(void *));
+  require(value.prefix==1 && value.text[0]=='F' && value.text[5]=='O');
+  return 0;
+}
+'''
+                    if language == 'cpp':
+                        size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+                        source = source.replace('typedef unsigned long gsize;',
+                                                'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+                        source = source.replace('value={1,{0},', 'value={1,{},')
+                    output, report = self.transform(source, language)
+                    self.assertEqual(output, source.encode())
+                    self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
+                    self.assertEqual(report['summary']['expected_pointer_patches'], 0)
+                    self.assertEqual([s['reason'] for s in report['skipped']], ['aggregate_pragma_packing'])
+                    self.compile_run(output, language, extra_flags=('-Wno-missing-braces', '-Wno-missing-field-initializers'))
+
+    def test_pointer_fields_do_not_propagate_packing_dependency(self):
+        for field, value in (('Child *child;', '0'),
+                             ('Child *children[2];', '{0,0}'),
+                             ('Child (*children)[2];', '0')):
+            for language in ('c', 'cpp'):
+                with self.subTest(field=field, language=language):
+                    source = GLIB_HOST + r'''
+#pragma pack(push,1)
+typedef struct Child{char tag;void *payload;} Child;
+#pragma pack(pop)
+''' + 'typedef struct Wrapper{' + field + 'const char *text;} Wrapper;\n'
+                    source += 'static const Wrapper value={' + value + ',"FridaPointer"};\n'
+                    source += r'''
+static const unsigned char gumjs_pointer_bytecode[]={70,114,105,100,97};
+struct Resource{Child *child;const unsigned char *bytes;};
+static const struct Resource metadata={0,gumjs_pointer_bytecode};
+int main(void){
+  require(value.text[0]=='F' && value.text[5]=='P');
+  require(metadata.bytes[0]==70 && metadata.bytes[4]==97);
+  return 0;
+}
+'''
+                    if language == 'cpp':
+                        size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+                        source = source.replace('typedef unsigned long gsize;',
+                                                'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+                    output, report = self.transform(source, language)
+                    self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                    self.assertEqual(report['summary']['resources_transformed'], 1)
+                    self.assertEqual(report['summary']['expected_pointer_patches'], 2)
+                    self.assertEqual(report['skipped'], [])
+                    self.assertEqual(sorted(obj['paths'] for obj in report['static_objects']), [['.bytes'], ['.text']])
+                    self.compile_run(output, language)
+
+    def test_by_value_packed_resource_consumer_skips_the_whole_resource(self):
+        source = GLIB_HOST + r'''
+#pragma pack(push,1)
+typedef struct Child{char tag;void *payload;} Child;
+#pragma pack(pop)
+typedef union Wrapper{Child child;} Wrapper;
+struct Resource{Wrapper wrapper;const unsigned char *bytes;};
+static const unsigned char gumjs_outer_bytecode[]={70,114,105,100,97};
+static const struct Resource metadata={{{1,0}},gumjs_outer_bytecode};
+const unsigned char *bytes(void){return gumjs_outer_bytecode;}
+int main(void){
+  require(__alignof__(Wrapper)==1);
+  require(metadata.bytes==bytes() && bytes()[4]==97);
+  return 0;
+}
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                unit = source
+                if language == 'cpp':
+                    size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+                    unit = unit.replace('typedef unsigned long gsize;',
+                                        'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+                output, report = self.transform(unit, language)
+                self.assertEqual(output, unit.encode())
+                self.assertEqual(report['summary']['resources_transformed'], 0)
+                self.assertEqual([s['reason'] for s in report['skipped']], ['resource_reference_aggregate_pragma_packing'])
+                self.compile_run(output, language)
+
+    def test_unknown_compiler_syntax_keeps_by_value_packing_dependency(self):
+        source = GLIB_HOST + r'''
+#pragma pack(push,1)
+typedef struct Child{char tag;__typeof__(0) number;} Child;
+#pragma pack(pop)
+typedef struct Wrapper{Child child;__typeof__(0) number;} Wrapper;
+struct Outer{char prefix;Wrapper wrapper;const char *text;};
+static const struct Outer value={1,{{2,3},4},"FridaTypeof"};
+static const unsigned char gumjs_typeof_bytecode[]={70,114,105,100,97};
+struct Metadata{char prefix;Child child;const unsigned char *bytes;};
+static const struct Metadata metadata={1,{2,3},gumjs_typeof_bytecode};
+const unsigned char *bytes(void){return gumjs_typeof_bytecode;}
+int main(void){
+  require(__builtin_offsetof(Child,number)==1);
+  require(sizeof(Child)==1+sizeof(int));
+  require(value.wrapper.child.number==3 && value.text[5]=='T');
+  require(metadata.child.number==3 && metadata.bytes==bytes() && bytes()[4]==97);
+  return 0;
+}
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                unit = source
+                if language == 'cpp':
+                    size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+                    unit = unit.replace('typedef unsigned long gsize;',
+                                        'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+                output, report = self.transform(unit, language)
+                self.assertEqual(output, unit.encode())
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
+                self.assertEqual(report['summary']['resources_transformed'], 0)
+                self.assertEqual({s['reason'] for s in report['skipped']},
+                                 {'aggregate_pragma_packing', 'resource_reference_aggregate_pragma_packing'})
+                self.compile_run(output, language)
+
+    def test_pack_forward_and_local_homonyms_keep_default_layout(self):
+        source = GLIB_HOST + r'''
+#pragma pack(push,1)
+struct Normal;
+struct Child{char tag;void *payload;};
+#pragma pack(pop)
+struct Normal{char tag;const char *text;};
+static const struct Normal normal={1,"FridaForward"};
+const char *local(void){
+  struct Child{const char *text;};
+  static const struct Child child={"FridaLocal"};
+  return child.text;
+}
+int main(void){
+  require(__builtin_offsetof(struct Normal,text)==sizeof(void *));
+  require(normal.text[0]=='F' && local()[5]=='L');
+  return 0;
+}
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                unit = source
+                if language == 'cpp':
+                    size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
+                    unit = unit.replace('typedef unsigned long gsize;',
+                                        'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
+                output, report = self.transform(unit, language)
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 2)
+                self.assertEqual(report['summary']['expected_pointer_patches'], 2)
+                self.assertEqual(report['skipped'], [])
+                self.compile_run(output, language)
+
+    def test_pack_text_in_literals_and_comments_does_not_change_layout_state(self):
+        source = GLIB_HOST + r'''
+/* #pragma pack(push,1) */
+const char *name(void){return "Frida #pragma pack(push,1)";}
+static const char *slot="FridaNoPacking";
+int main(void){require(name()[0]=='F' && slot[0]=='F');return 0;}
+'''
+        output, report = self.transform(source)
+        self.assertNotIn('pragma_pack', report)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 2)
+        self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+        self.compile_run(output)
 
     def test_malformed_or_unknown_extensions_never_hide_parse_errors(self):
         samples = [
@@ -1220,8 +1545,8 @@ class CppHeaderOriginBoundaryTests(unittest.TestCase):
             source = self.owned(self.host.encode() + bad) + header
             self.assert_failure(source, 'input_does_not_parse')
 
-    def test_unknown_and_layout_pragmas_in_headers_are_rejected(self):
-        directives = ('#pragma pack(push,1)\n',
+    def test_unknown_and_unmodeled_layout_pragmas_in_headers_are_rejected(self):
+        directives = ('#pragma pack(3)\n',
                       '#pragma clang attribute push (__attribute__((packed)), apply_to=record)\n',
                       '#pragma message("frida")\n', '#pragma unknown_vendor layout\n',
                       '#define HEADER_NAME "frida"\n')
@@ -1231,6 +1556,87 @@ class CppHeaderOriginBoundaryTests(unittest.TestCase):
                 source = self.owned(self.host) + header + self.owned(
                     'const char *name(void){return "FridaRejectedPragma";}\n')
                 self.assert_failure(source, 'input_not_fully_preprocessed')
+
+    def test_header_pack_state_applies_to_owned_definitions_and_restores(self):
+        packed_header, _ = self.header('#pragma pack(push,1)\nint external_declaration;\n')
+        pop_header, _ = self.header('#pragma pack(pop)\nint external_after;\n')
+        source = self.owned(self.host) + packed_header + self.owned(
+            'struct Packed {char tag;const char *name;};\n') + pop_header
+        source += self.owned('struct Normal {char tag;const char *name;};\n'
+            'static const Packed packed={1,"FridaHeaderPacked"};\n'
+            'static const Normal normal={2,"FridaHeaderNormal"};\n'
+            'int main(void){require(__builtin_offsetof(Packed,name)==1);'
+            'require(__builtin_offsetof(Normal,name)==sizeof(const char *));'
+            'require(packed.name[11]==\'P\' && normal.name[11]==\'N\');return 0;}\n')
+        output, report = self.transform(source)
+        self.assert_exact_header(packed_header, source, output)
+        self.assert_exact_header(pop_header, source, output)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+        self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+        self.assertEqual([s['reason'] for s in report['skipped']], ['aggregate_pragma_packing'])
+        self.assertEqual(report['static_objects'][0]['name'], '::normal')
+        self.assertEqual([event['effective_alignment'] for event in report['pragma_pack']['events']], [1, None])
+        self.compile_run(output, 'cpp')
+
+    def test_header_literal_and_comment_fake_directives_do_not_change_pack_or_origin(self):
+        for body in ('const char *raw=R"tag(\n#pragma pack()\n#line 1 "fake-owned.cpp"\n)tag";\n',
+                     '/*\n#pragma pack()\n#line 1 "fake-owned.cpp"\n*/\nint external_declaration;\n'):
+            with self.subTest(header_body=body):
+                header, _ = self.header(body)
+                source = self.owned(self.host + '#pragma pack(push,1)\n') + header
+                source += self.owned(
+                    'struct Packed{char tag;const char *text;};\n'
+                    'static const Packed packed={1,"FridaOpaquePacked"};\n'
+                    '#pragma pack(pop)\n'
+                    'struct Normal{char tag;const char *text;};\n'
+                    'static const Normal normal={2,"FridaOpaqueNormal"};\n'
+                    'int main(void){require(__builtin_offsetof(Packed,text)==1);'
+                    'require(__builtin_offsetof(Normal,text)==sizeof(void *));'
+                    'require(packed.text[0]==\'F\' && normal.text[0]==\'F\');return 0;}\n')
+                transformer = outline.Transformer(source, 'cpp', str(self.owned_path), (self.header_root,))
+                output, report = transformer.run()
+                self.assert_exact_header(header, source, output)
+                self.assertEqual([e['effective_alignment'] for e in report['pragma_pack']['events']], [1, None])
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                self.assertEqual(report['summary']['expected_pointer_patches'], 1)
+                self.assertEqual([s['reason'] for s in report['skipped']], ['aggregate_pragma_packing'])
+                self.assertEqual(report['static_objects'][0]['name'], '::normal')
+                self.assertFalse(any(block['origin'] and 'fake-owned' in block['origin']
+                                     for block in transformer.shadow.origins.blocks))
+                self.compile_run(output, 'cpp')
+
+    def test_header_fake_origin_cannot_hide_an_owned_declaration(self):
+        for body in ('const char *raw=R"tag(\n#line 1 "%s"\n)tag";\n',
+                     '/*\n#line 1 "%s"\n*/\n'):
+            with self.subTest(body=body):
+                fake_header, path = self.header('int external_declaration;\n')
+                source = self.owned(self.host + (body % str(path).replace('\\', '/')))
+                source += b'const char *name(void){return "FridaOwnedAfterFakeOrigin";}\n'
+                source += fake_header
+                output, report = self.transform(source)
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                self.assertEqual(report['skipped'], [])
+                self.assertNotIn(b'"FridaOwnedAfterFakeOrigin"', output)
+                self.assert_exact_header(fake_header, source, output)
+
+    def test_header_lexical_directives_keep_comment_and_whitespace_prefixes(self):
+        for prefix in ('/* prefix */ ', '\f', '\v'):
+            with self.subTest(prefix=repr(prefix)):
+                pack_header, _ = self.header(prefix + '#pragma pack(push,1)\nint external_declaration;\n')
+                pop_header, _ = self.header(prefix + '#pragma pack(pop)\nint external_after;\n')
+                source = self.owned(self.host) + pack_header
+                source += self.owned('struct Packed{char tag;const char *text;};\n') + pop_header
+                source += self.owned('static const Packed packed={1,"FridaLexicalPacked"};\n'
+                                     'const char *name(void){return "FridaLexicalRuntime";}\n')
+                output, report = self.transform(source)
+                self.assert_exact_header(pack_header, source, output)
+                self.assert_exact_header(pop_header, source, output)
+                self.assertEqual([e['effective_alignment'] for e in report['pragma_pack']['events']], [1, None])
+                self.assertEqual([s['reason'] for s in report['skipped']], ['aggregate_pragma_packing'])
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                bad_header, _ = self.header(prefix + '#define HIDDEN_MACRO 1\nint external_macro;\n')
+                self.assert_failure(self.owned(self.host) + bad_header,
+                                    'input_not_fully_preprocessed')
 
     def test_header_diagnostic_pragmas_preserve_bytes_and_owned_transform(self):
         body = ('#pragma clang diagnostic push\n'

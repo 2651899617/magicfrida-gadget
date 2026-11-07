@@ -1,6 +1,12 @@
 # 当前工程状态
 
-记录日期：2026-11-07。
+记录日期：2026-11-08。
+
+## 2026-11-08 完整 Android 构建的 packing 指令修复（实施中）
+
+提交 `ef1f35a1cb9b62af0ce6820048459fd3f5d8e193` 的 run [42388162339](https://github.com/2651899617/magicfrida-gadget/actions/runs/42388162339) 已结束。Linux 回归为 **307 项，304 通过、0 失败、0 错误、3 跳过**，用时 32.372 秒；跳过项是 CI 缺少历史 Gadget 归档一项、未显式选择 NDK 的两项编码器测试。包装器的真实 arm64/armv7 对象和 host C/C++ 原值恢复集成通过，两版独立 Vala/GLib 枚举契约也通过。两版完整 Android 构建均在 `gumdarwingrafter.c` 的合法 `#pragma pack (push, 1)` 处被编码器误判 `input_not_fully_preprocessed`；此前失败的 core `patch.c` 和枚举对象已通过该轮实际编译。失败归档已核对 digest、大小、CRC 和路径；交付程序在构建门槛处退出，手机正式 Frida 文件未替换。
+
+packing 修复保留原指令字节，按完整预处理输入的顺序跟踪生效范围，包含外部 C++ 头里的真实词法指令。packing 期间定义的聚合类型在后续静态对象中保持未知，即使对象在 `pop` 后声明也跳过字段改写；布局依赖递归穿透按值成员、数组、union/class 和 C++ 基类，指针与函数成员不传播该依赖。不安全的元数据引用使整个数字资源跳过。注释及 raw string 内的伪 `#pragma/#line` 不改变指令或来源状态；数字 pop 和关键字／保留编译器拼写 label 拒绝，避免 Clang/GCC 语义分歧。新增嵌套恢复、默认布局、递归按值依赖、指针例外、外部头跨来源、整资源跳过和无效指令拒绝测试。冻结编码器 SHA-256 为 `efaad29a46871990a3ed524fa1516acf9ae78c31157a66eadd54729b3e6b15b6`；源码专项 **76/76**、零 skip，用时 39.163 秒，包含实际 host C/C++ 和 NDK 编译，以及未知 `typeof` 语法提前返回前的递归 packing 标记保持；日志 `work/nianchu-outline-packing-source-tests-20261108-f.log`。最终冻结身份的独立 packing 审查完成，约定范围内无剩余阻断；五组完整 `gumdarwingrafter.c` 输入完成编码和实际 GNU99 NDK 对象编译（16 r25 arm64/arm32、17 arm64 r25/r26 和 17 arm32 r25 对照），全部原 pragma 字节／顺序与六个 packed record 布局保持。最终证据为 `work/nianchu-authentic-grafter-tu-20261107-61mgt_6b/evidence/catalog-encoder-efaad29a.json`，SHA-256 `ef9a69a2a936b07f03a231f8f153e4f4f1f7a3408c42198fe86fafdea7997233`。17 arm32/r26 的合成对照原 `-E -P` 输入在 API 19 的 `strtof` 声明处失败，未运行编码器、不计通过；17 r25/r26 均为本地对照，产品仍由固定 r29 CI 验收。完整本地回归 **323 项，320 通过、0 失败、0 错误、3 跳过**，用时 393.662 秒；跳过项为 Windows 符号链接权限两项、本机缺 valac 一项。测试期间十份受检文件大小及 SHA-256 保持，报告 `work/nianchu-outline-regression-final-20261108-packing-a/verification.json`。同一最终编码器的两版真实完整 `gumv8apiresolver.cpp` installer→wrapper→outliner→NDK 对象集成也通过：16 r25/C++17 对象 142,128 字节，SHA-256 `a0880b7f63f8cf4f4b29eb18d4c59e6fef24f42acfbeec268da86e7ac229bbbc`；17 r26/C++20 对照对象 265,736 字节，SHA-256 `811feba29fb366a51f3097b8521aa30c817f780e35a13ee3149d1360810f4963`。每版四处 literal、两个 heap buffer，1,701 份冻结输入的 hash/mode 保持，原依赖闭包及 ELF64/AArch64 ET_REL 节边界通过，临时文件已清理；报告位于 `work/nianchu-authentic-cpp-wrapper-integration-20261107-a/runs/source16-efaad29a-20261108-a/integration.json` 与 `runs/source17-ndk26-reference-efaad29a-20261108-a/integration.json`。下一次固定 NDK 的完整 Android 构建随后按提交身份执行；下文 307 项本地结果属于 `ef1f35a` 提交前的编码器身份。
 
 ## 2026-11-07 E 轮完整可读段字符串改造（实施中）
 
