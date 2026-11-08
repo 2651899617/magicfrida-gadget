@@ -2,6 +2,16 @@
 
 记录日期：2026-11-08。
 
+## 2026-11-08 libbpf `size_t :0` 位域解析修复（本地验证通过，固定产品构建待验收）
+
+提交 `068b382cc4c08419bca300f3663ddb2295caed11` 的 run [42448381735](https://github.com/2651899617/magicfrida-gadget/actions/runs/42448381735) 中，17.25.2/r29 的唯一失败仍在 Vala 生成的 `lib/base/linux.c` 输入解析阶段；19 个 parse_error 全部对应 libbpf 的 `size_t :0;`。固定 tree-sitter-c 0.24.2 将 `size_t` 分类为 `primitive_type`，原整数类型白名单未接受它。本次只对完整原类型字节为 `size_t` 的该节点补齐识别，继续使用原字段 named/projected parser-only probes、宽度完整 AST/span 和原始编译字节验证；未扩大其它 primitive 类型的接受范围。
+
+最终编码器 SHA-256 为 `6c76941d20fb18aa28bfb9a985df9d5b9e9fd884cc32f0ccda3b077c8cba255f`。四项专项全部通过，覆盖 CRLF/原类型与宽度保留、畸形字段拒绝、实际 host 原输入与编码后运行及 NDK25 两架构对象。完整回归 **347 项，344 通过、0 失败、0 错误、3 环境跳过**，受检十份源码 SHA/size 前后一致，报告 `work/nianchu-size-t-regression-20261108-b/verification.json`；跳过为 Windows 符号链接权限两项及本机缺 valac 一项，真实 arm64/arm32 C/C++ wrapper 对象验证已实际通过。首轮 a 的新增 fixture 错把合法 qualified 位域列为应拒绝输入，并在 cpp-output 模式中留下未展开的 `__SIZE_TYPE__`；修正 fixture 的输入模式与错误预期后通过，未放宽产品解析检查。
+
+19 个真实完整 libbpf scope 的 LF/CRLF **38/38** 通过，原字段、宽度 AST/span 和完整输出字节一致，聚合与编译期限制仍保守拒绝。完整 SDK17 `#include <bpf/libbpf.h>` 的本地 NDK25 arm64/arm32 baseline→完整预处理→编码器→对象链均成功，每架构 54 次匿名规范化，其中 19 次为 `size_t`；编码器输出与完整原预处理字节相同，6 个正确架构 ET_REL 对象和 16 条 clang/readelf 子命令均通过。报告 `work/nianchu-libbpf19-candidate-evidence-20261108-b/validation-report.json`，SHA-256 `7330b33a38480022312a1939cd42e4d38201a8504e03c9df1c78af63a79c0473`。该范围不当作整份 CI `linux.c` 复现或 r29 产品验收；后续固定 16/r25、17/r29 完整构建、E 预算与手机 native 验收继续按新提交身份执行。
+
+内核模块 `nianchu-ptrace 1.1.2` 已完成实际构建、三组 ARM64 仿真和原子文件交付：`/data/local/tmp/nianchu-ptrace.kpm`，27,776 字节，`0644`、`root:root`，SHA-256 `3a9b9072cc4fb649c7071eb576a314c51b7d98e3557b9a14bd58ec5ab493220d`。module fixture 实际 136 场景、669 断言、0 失败，源码前后身份一致；交付记录 `work/nianchu-kpm-maps-symbols-delivery-20261108-a/deployment.json`。本次只交付文件，未加载/卸载/控制 KPM，手机 helper clone ABI 和 App 崩溃结果仍待动态验证。
+
 ## 2026-11-08 NDK C 无名位域解析修复（源码专项通过，完整产品待验收）
 
 提交 `af3035d521d9aca53f6ced46f5bb31a832a431d9` 的 run [42440530273](https://github.com/2651899617/magicfrida-gadget/actions/runs/42440530273) 已通过 checks，17.25.2/r29 完成后结论 failure。独立下载归档身份为 ID `13602961104`，834,419 字节，SHA-256 `bea0bafbcefdc6aaba82364d8ea1c57110a4916aa1675f4ae8e12a3c74726c38`；大小、完整 SHA、CRC、safe paths 与所有解包字节已核。172 份 TU receipts 为 140 C 和 31 C++ compiled/rc0、1 C failed；真实 `gumv8scriptbackend.cpp` 已通过一次 `anonymous-enum-base` normalization。完整 29,142 行日志唯一失败 TU 为 Vala 0.58.0-frida 生成的 `linux.c`，预处理 rc0 后在 outliner 报 `input_does_not_parse`，尚未调用变换后 compiler。报告的 20 个 parse_error 为 `__u32 :32/:24/:31`、`__u64 :64`、`__u16 :16`；20 是窗口上限，不能据此断言完整输入没有其它语法问题。原 generated C、完整 pp 和 depfile 未归档，C 的 `-P` 去掉来源行，窗口不当作完整 TU。独立证据 `work/nianchu-outline-diagnostic-evidence-42440530273-17-20261108-b/diagnostics.json` 与 `linux-parse-errors.json`。本节记录时 16/r25 仍在 Build server/Gadget 步骤；已停止该失败 run 的等待交付程序，`device_delivery_started=false`。

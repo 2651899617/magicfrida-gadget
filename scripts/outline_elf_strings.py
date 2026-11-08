@@ -545,7 +545,9 @@ class _ParserShadow:
             width, colon, semicolon = widths[0], colons[0], semicolons[0]
             raw_type = self.source[base.start_byte:base.end_byte]
             type_tokens = _lex(raw_type)
-            if base.type == 'type_identifier':
+            # The pinned C grammar classifies size_t as primitive_type even
+            # though its original typedef still determines the bitfield width.
+            if base.type == 'type_identifier' or (base.type == 'primitive_type' and raw_type == b'size_t'):
                 valid_type = (len(type_tokens) == 1 and type_tokens[0].kind == 'identifier'
                               and type_tokens[0].value not in excluded)
             else:

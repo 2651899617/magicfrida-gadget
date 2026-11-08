@@ -1244,11 +1244,13 @@ int main(void){
 typedef unsigned int __u32;
 typedef unsigned long long __u64;
 typedef unsigned short __u16;
+typedef __SIZE_TYPE__ size_t;
 struct S {
   __u32 :32;
   __u64 :64;
   __u32 :24;
   __u16 :16;
+  size_t /*gap*/ : /*width*/ 0;
   unsigned int :0;
   int:1;
   unsigned/*base*/
@@ -1262,7 +1264,7 @@ struct S {
         self.assertEqual([i for i, c in enumerate(transformer.shadow.view) if c in (10, 13)],
                          [i for i, c in enumerate(source) if c in (10, 13)])
         regions = [r for r in transformer.shadow.regions if r['kind'] == 'anonymous-bitfield-type']
-        self.assertEqual(len(regions), 7)
+        self.assertEqual(len(regions), 8)
         expected = bytearray(source)
         for region in regions:
             expected[region['start']:region['end']] = outline._padded(source[region['start']:region['end']], b'T x')
@@ -1271,7 +1273,7 @@ struct S {
         self.assertEqual(transformer.shadow.view, bytes(expected))
         transformer.collect_types()
         fields = [n for n in transformer.nodes if n.type == 'field_declaration']
-        self.assertEqual(len(fields), 8)
+        self.assertEqual(len(fields), 9)
         for field in fields:
             if not transformer.shadow.attached(field, 'anonymous-bitfield-type'):
                 self.assertEqual(transformer.text(field.child_by_field_name('declarator')), 'named')
@@ -1301,6 +1303,10 @@ struct S {
             'struct S { float :3; };',
             'struct S { double :3; };',
             'struct S { void :3; };',
+            'struct S { size_t :; };',
+            'struct S { size_t :(1+); };',
+            'struct S { size_t :0 };',
+            'struct S { size_t :0, named:8; };',
             'struct S { __u32 __attribute__((unknown_nso_attribute)) :24; };',
         )
         for source in broken:
@@ -1387,6 +1393,38 @@ int main(void){
         self.assertIn(b'unsigned int :0;', output)
         self.compile_run(output)
 
+    def test_host_c_anonymous_size_t_zero_width_layout_and_runtime_bytes(self):
+        source = GLIB_HOST + r'''
+typedef __SIZE_TYPE__ size_t;
+struct Bits {
+  size_t low:3;
+  size_t :5;
+  size_t high:8;
+  size_t :0;
+  unsigned int tail;
+};
+_Static_assert(__builtin_offsetof(struct Bits,tail)==sizeof(size_t),"size_t zero-width boundary");
+const char *name(void){return "FridaSizeTBitfieldRuntime";}
+int main(void){
+  struct Bits bits={0};
+  size_t word=0;
+  bits.low=5; bits.high=0xa6; bits.tail=0x11223344;
+  __builtin_memcpy(&word,&bits,sizeof(word));
+  require(word==((size_t)5|((size_t)0xa6<<8)) && bits.tail==0x11223344U);
+  require(strcmp(name(),EXPECTED)==0 && name()==name());
+  return 0;
+}
+'''
+        source = source.replace('EXPECTED', c_string('FridaSizeTBitfieldRuntime'))
+        self.compile_run(source, input_language='c')
+        output, report = self.transform(source)
+        self.assertEqual(report['skipped'], [])
+        self.assertEqual(report['parser_normalization']['kind_counts']['anonymous-bitfield-type'], 2)
+        self.assertEqual(report['summary']['heap_buffers'], 1)
+        self.assertIn(b'size_t :5;', output)
+        self.assertIn(b'size_t :0;', output)
+        self.compile_run(output, input_language='c')
+
     def test_real_ndk_bpf_anonymous_bitfields_compile_both_architectures(self):
         clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
         if not clang:
@@ -1400,6 +1438,8 @@ void *g_malloc(gsize);
 int g_once_init_enter(volatile gsize *);
 void g_once_init_leave(volatile gsize *,gsize);
 struct Bits { unsigned int low:3; unsigned int :5; unsigned int high:8; unsigned int :0; unsigned int tail; };
+struct SizeTBits { size_t low:3; size_t :5; size_t high:8; size_t :0; unsigned int tail; };
+_Static_assert(offsetof(struct SizeTBits,tail)==sizeof(size_t),"size_t zero-width bitfield boundary");
 _Static_assert(sizeof(struct Bits)==8,"bitfield object size");
 _Static_assert(offsetof(struct Bits,tail)==4,"zero-width bitfield boundary");
 _Static_assert(sizeof(((struct bpf_prog_info *)0)->type)==4,"real UAPI member width");
