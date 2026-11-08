@@ -473,6 +473,9 @@ class _ParserShadow:
         if language == 'cpp':
             self.cpp_declarators(shadow)
             self.view = bytes(shadow)
+        elif language == 'c':
+            self.c_anonymous_bitfields(shadow)
+            self.view = bytes(shadow)
         preliminary = parser.parse(self.view)
         # Only declarator labels, confirmed by an AST declaration context.  A
         # basic/extended asm *statement* must retain its instruction operands.
@@ -496,7 +499,149 @@ class _ParserShadow:
         self.type_contexts = {}
         self.bind_regions()
         self.bind_cpp_regions()
+        self.bind_c_bitfields()
         self.starts = [t.start for t in self.tokens]
+
+    @staticmethod
+    def bitfield_signature(node, offset=0):
+        return (str(node), tuple((n.type, n.start_byte - offset, n.end_byte - offset,
+                                 n.is_named, n.is_missing) for n in _walk_all(node)))
+
+    def c_anonymous_bitfields(self, shadow):
+        # The pinned C grammar requires a name on otherwise legal anonymous
+        # bitfields.  Validate the entire original field with an inserted probe
+        # name, then project only its original type span to T x.  Neither the
+        # width expression nor its compile-time/resource uses can disappear.
+        tree = self.parser.parse(bytes(shadow))
+        integer_words = {b'char', b'signed', b'unsigned', b'short', b'int', b'long',
+                         b'_Bool', b'__int128'}
+        excluded = _PACK_LABEL_KEYWORDS | set(_KEYWORD_ALIASES) | _NULLABILITY | _TYPEOF | {
+            b'__underlying_type', b'__func__', b'__FUNCTION__', b'__PRETTY_FUNCTION__'}
+        prefix, suffix = b'struct _nso_bitfield_owner { ', b' };\n'
+        insertion = b' _nso_bitfield_probe '
+        for field in _walk(tree.root_node):
+            if field.type != 'field_declaration' or field.parent is None or field.parent.type != 'field_declaration_list':
+                continue
+            base = field.child_by_field_name('type')
+            declarators = field.children_by_field_name('declarator')
+            clauses = [n for n in field.named_children if n.type == 'bitfield_clause']
+            errors = [n for n in _walk_all(field) if n.type == 'ERROR' or n.is_missing]
+            if (len(declarators) != 1 or declarators[0].type != 'field_identifier'
+                    or not declarators[0].is_missing or errors != [declarators[0]]
+                    or base is None or base.has_error
+                    or base.type not in {'primitive_type', 'sized_type_specifier', 'type_identifier'}
+                    or len(clauses) != 1 or clauses[0].has_error):
+                continue
+            name, clause = declarators[0], clauses[0]
+            widths = [n for n in clause.named_children if n.type != 'comment']
+            colons = [n for n in clause.children if n.type == ':']
+            semicolons = [n for n in field.children if n.type == ';']
+            if (len(widths) != 1 or widths[0].has_error or len(colons) != 1
+                    or len(semicolons) != 1 or semicolons[0].is_missing
+                    or semicolons[0].end_byte != field.end_byte
+                    or not (base.end_byte <= name.start_byte == name.end_byte <= colons[0].start_byte)
+                    or _lex(bytes(shadow[base.end_byte:colons[0].start_byte]))):
+                continue
+            width, colon, semicolon = widths[0], colons[0], semicolons[0]
+            raw_type = self.source[base.start_byte:base.end_byte]
+            type_tokens = _lex(raw_type)
+            if base.type == 'type_identifier':
+                valid_type = (len(type_tokens) == 1 and type_tokens[0].kind == 'identifier'
+                              and type_tokens[0].value not in excluded)
+            else:
+                valid_type = bool(type_tokens) and all(t.kind == 'identifier' and t.value in integer_words for t in type_tokens)
+            if (not valid_type or len(raw_type) < 3 or any(c in (10, 13) for c in raw_type[:3])
+                    or self.source[width.start_byte:width.end_byte] != bytes(shadow[width.start_byte:width.end_byte])):
+                continue
+            raw_field = self.source[field.start_byte:field.end_byte]
+            at = colon.start_byte - field.start_byte
+            named_source = prefix + raw_field[:at] + insertion + raw_field[at:] + suffix
+            named_tree = self.parser.parse(named_source)
+            named_fields = [n for n in _walk(named_tree.root_node) if n.type == 'field_declaration']
+            if named_tree.root_node.has_error or len(named_fields) != 1:
+                continue
+            named_field = named_fields[0]
+            named_base = named_field.child_by_field_name('type')
+            named_names = named_field.children_by_field_name('declarator')
+            named_clauses = [n for n in named_field.named_children if n.type == 'bitfield_clause']
+            delta = len(prefix) - field.start_byte
+            width_delta = delta + len(insertion)
+            if (named_base is None or named_base.type != base.type
+                    or (named_base.start_byte, named_base.end_byte) != (base.start_byte + delta, base.end_byte + delta)
+                    or named_source[named_base.start_byte:named_base.end_byte] != raw_type
+                    or len(named_names) != 1 or named_names[0].type != 'field_identifier'
+                    or named_source[named_names[0].start_byte:named_names[0].end_byte] != b'_nso_bitfield_probe'
+                    or (named_field.start_byte, named_field.end_byte) != (field.start_byte + delta, field.end_byte + width_delta)
+                    or len(named_clauses) != 1
+                    or (named_clauses[0].start_byte, named_clauses[0].end_byte) != (clause.start_byte + width_delta, clause.end_byte + width_delta)):
+                continue
+            named_widths = [n for n in named_clauses[0].named_children if n.type != 'comment']
+            signature = self.bitfield_signature(width)
+            if len(named_widths) != 1 or self.bitfield_signature(named_widths[0], width_delta) != signature:
+                continue
+            replacement = _padded(raw_type, b'T x')
+            projected_source = (prefix + bytes(shadow[field.start_byte:base.start_byte]) + replacement
+                                + bytes(shadow[base.end_byte:field.end_byte]) + suffix)
+            projected_tree = self.parser.parse(projected_source)
+            projected_fields = [n for n in _walk(projected_tree.root_node) if n.type == 'field_declaration']
+            if projected_tree.root_node.has_error or len(projected_fields) != 1:
+                continue
+            projected_field = projected_fields[0]
+            projected_base = projected_field.child_by_field_name('type')
+            projected_names = projected_field.children_by_field_name('declarator')
+            projected_clauses = [n for n in projected_field.named_children if n.type == 'bitfield_clause']
+            if (projected_base is None or projected_base.type != 'type_identifier'
+                    or (projected_base.start_byte, projected_base.end_byte) != (base.start_byte + delta, base.start_byte + delta + 1)
+                    or len(projected_names) != 1 or projected_names[0].type != 'field_identifier'
+                    or (projected_names[0].start_byte, projected_names[0].end_byte) != (base.start_byte + delta + 2, base.start_byte + delta + 3)
+                    or (projected_field.start_byte, projected_field.end_byte) != (field.start_byte + delta, field.end_byte + delta)
+                    or len(projected_clauses) != 1
+                    or (projected_clauses[0].start_byte, projected_clauses[0].end_byte) != (clause.start_byte + delta, clause.end_byte + delta)):
+                continue
+            projected_widths = [n for n in projected_clauses[0].named_children if n.type != 'comment']
+            if len(projected_widths) != 1 or self.bitfield_signature(projected_widths[0], delta) != signature:
+                continue
+            self.replace(shadow, base.start_byte, base.end_byte, 'anonymous-bitfield-type', b'T x')
+            self.regions[-1].update(field_start=field.start_byte, field_end=field.end_byte,
+                                    clause_start=clause.start_byte, clause_end=clause.end_byte,
+                                    colon_start=colon.start_byte, colon_end=colon.end_byte,
+                                    width_start=width.start_byte, width_end=width.end_byte,
+                                    width_signature=signature,
+                                    semicolon_start=semicolon.start_byte, semicolon_end=semicolon.end_byte)
+
+    def bind_c_bitfields(self):
+        if self.language != 'c':
+            return
+        for region in self.regions:
+            if region['kind'] != 'anonymous-bitfield-type':
+                continue
+            node = self.tree.root_node.descendant_for_byte_range(region['field_start'], region['field_end'])
+            owner = next((n for n in (node, *_parents(node)) if n.type == 'field_declaration'
+                          and (n.start_byte, n.end_byte) == (region['field_start'], region['field_end'])), None)
+            base = owner.child_by_field_name('type') if owner is not None else None
+            names = owner.children_by_field_name('declarator') if owner is not None else []
+            clauses = [n for n in owner.named_children if n.type == 'bitfield_clause'] if owner is not None else []
+            semicolons = [n for n in owner.children if n.type == ';'] if owner is not None else []
+            if (owner is None or owner.has_error or base is None or base.type != 'type_identifier'
+                    or (base.start_byte, base.end_byte) != (region['start'], region['start'] + 1)
+                    or self.view[base.start_byte:base.end_byte] != b'T'
+                    or len(names) != 1 or names[0].type != 'field_identifier'
+                    or (names[0].start_byte, names[0].end_byte) != (region['start'] + 2, region['start'] + 3)
+                    or self.view[names[0].start_byte:names[0].end_byte] != b'x'
+                    or len(clauses) != 1
+                    or (clauses[0].start_byte, clauses[0].end_byte) != (region['clause_start'], region['clause_end'])
+                    or len(semicolons) != 1
+                    or (semicolons[0].start_byte, semicolons[0].end_byte) != (region['semicolon_start'], region['semicolon_end'])):
+                raise Unsupported('c_anonymous_bitfield_context')
+            widths = [n for n in clauses[0].named_children if n.type != 'comment']
+            colons = [n for n in clauses[0].children if n.type == ':']
+            if (len(widths) != 1 or (widths[0].start_byte, widths[0].end_byte) != (region['width_start'], region['width_end'])
+                    or self.bitfield_signature(widths[0]) != region['width_signature']
+                    or len(colons) != 1 or (colons[0].start_byte, colons[0].end_byte) != (region['colon_start'], region['colon_end'])):
+                raise Unsupported('c_anonymous_bitfield_context')
+            # Synthetic parser identifiers are never real fields or types.
+            self.attachments.setdefault(owner.id, []).append(region)
+            self.attachments.setdefault(base.id, []).append(region)
 
     def cpp_declarators(self, shadow):
         tokens = self.tokens
@@ -1235,12 +1380,13 @@ class Transformer:
                     self.skip_region(start, region['start'] + token.end, 'skipped_header_origin',
                                      'numeric-resource', ', '.join(region['origins']))
         for region in self.shadow.regions:
-            if region['kind'] not in {'attribute', 'typeof', 'builtin-type', 'asm-declarator', 'template-destructor', 'anonymous-enum-base'}:
+            if region['kind'] not in {'attribute', 'typeof', 'builtin-type', 'asm-declarator', 'template-destructor', 'anonymous-enum-base', 'anonymous-bitfield-type'}:
                 continue
             reason = {'attribute': 'attribute_context', 'typeof': 'compile_time_or_type_context',
                       'builtin-type': 'compile_time_or_type_context', 'asm-declarator': 'assembly_context',
                       'template-destructor': 'compile_time_or_type_context',
-                      'anonymous-enum-base': 'compile_time_or_type_context'}[region['kind']]
+                      'anonymous-enum-base': 'compile_time_or_type_context',
+                      'anonymous-bitfield-type': 'compile_time_or_type_context'}[region['kind']]
             tokens = self.shadow.hidden_tokens(region)
             i = 0
             while i < len(tokens):
@@ -1359,6 +1505,8 @@ class Transformer:
             return _shape(unsafe='aggregate_pragma_packing', packing_dependent=True)
         if self.shadow.within(node, {'typeof'}):
             return _shape(unsafe='compiler_inferred_type')
+        if self.shadow.attached(node, 'anonymous-bitfield-type'):
+            return _shape(unsafe='c_anonymous_bitfield_type')
         if self.shadow.within(node, {'member-pointer'}) or node.id in self.shadow.type_contexts:
             return _shape(unsafe='cpp_member_pointer_type')
         if node.type in {'primitive_type', 'sized_type_specifier'}:
@@ -1451,6 +1599,8 @@ class Transformer:
         return _shape(unsafe='unsupported_declarator')
 
     def declared_type(self, declaration, declarator):
+        if self.shadow.attached(declaration, 'anonymous-bitfield-type'):
+            return _shape(unsafe='c_anonymous_bitfield_type')
         if (declaration.id in self.shadow.type_contexts
                 or self.shadow.within(declarator, {'member-pointer'})):
             return _shape(unsafe='cpp_member_pointer_type')
@@ -1686,10 +1836,12 @@ class Transformer:
         return None
 
     def compiletime_reason(self, node):
-        # Enumerators remain constant expressions even when a nested sizeof
-        # would otherwise receive the generic size/alignment classification.
+        # Enumerators and bitfield widths remain constant expressions even
+        # when a nested sizeof would otherwise receive the generic context.
         if any(parent.type == 'enumerator' for parent in _parents(node)):
             return 'enum_value_compile_time_context'
+        if any(parent.type == 'bitfield_clause' for parent in _parents(node)):
+            return 'bitfield_width_compile_time_context'
         for parent in _parents(node):
             if parent.type in {'declaration', 'field_declaration', 'function_definition'} and self.shadow.attached(parent, 'deleted-function'):
                 return 'deleted_function_context'
@@ -1980,7 +2132,7 @@ class Transformer:
                 self.skip(variable['node'], 'resource_reference_header_origin', 'numeric-resource', variable['name'])
                 continue
             hidden_reference = next((r for r in self.shadow.regions
-                                     if r['kind'] in {'attribute', 'typeof', 'builtin-type', 'asm-declarator', 'template-destructor', 'anonymous-enum-base'}
+                                     if r['kind'] in {'attribute', 'typeof', 'builtin-type', 'asm-declarator', 'template-destructor', 'anonymous-enum-base', 'anonymous-bitfield-type'}
                                      and any(t.kind == 'identifier' and t.value == variable['name'].encode('utf-8')
                                              for t in self.shadow.hidden_tokens(r))), None)
             if hidden_reference is not None:
@@ -2004,6 +2156,9 @@ class Transformer:
                     break
                 if any(parent.type == 'enumerator' for parent in _parents(node)):
                     unsafe = 'resource_reference_enum_value_compile_time_context'
+                    break
+                if any(parent.type == 'bitfield_clause' for parent in _parents(node)):
+                    unsafe = 'resource_reference_bitfield_width_compile_time_context'
                     break
                 sizeof = next((p for p in _parents(node) if p.type in {'sizeof_expression', 'alignof_expression'}), None)
                 if sizeof is not None:

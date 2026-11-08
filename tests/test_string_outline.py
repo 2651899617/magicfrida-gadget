@@ -1239,6 +1239,210 @@ int main(void){
         self.assertEqual(report['summary']['heap_buffers'], 1)
         self.compile_run(output, 'cpp', extra_flags=('-std=c++17',))
 
+    def test_c_anonymous_bitfield_shadow_preserves_width_offsets_and_original_bytes(self):
+        source = r'''
+typedef unsigned int __u32;
+typedef unsigned long long __u64;
+typedef unsigned short __u16;
+struct S {
+  __u32 :32;
+  __u64 :64;
+  __u32 :24;
+  __u16 :16;
+  unsigned int :0;
+  int:1;
+  unsigned/*base*/
+  int /*gap*/ : /*width*/ (24+8);
+  unsigned int named:7;
+};
+'''.replace('\n', '\r\n').encode()
+        transformer = outline.Transformer(source, 'c', 'anonymous-bitfields.i')
+        self.assertFalse(transformer.root.has_error)
+        self.assertEqual(len(transformer.shadow.view), len(source))
+        self.assertEqual([i for i, c in enumerate(transformer.shadow.view) if c in (10, 13)],
+                         [i for i, c in enumerate(source) if c in (10, 13)])
+        regions = [r for r in transformer.shadow.regions if r['kind'] == 'anonymous-bitfield-type']
+        self.assertEqual(len(regions), 7)
+        expected = bytearray(source)
+        for region in regions:
+            expected[region['start']:region['end']] = outline._padded(source[region['start']:region['end']], b'T x')
+            self.assertEqual(source[region['end']:region['field_end']],
+                             transformer.shadow.view[region['end']:region['field_end']])
+        self.assertEqual(transformer.shadow.view, bytes(expected))
+        transformer.collect_types()
+        fields = [n for n in transformer.nodes if n.type == 'field_declaration']
+        self.assertEqual(len(fields), 8)
+        for field in fields:
+            if not transformer.shadow.attached(field, 'anonymous-bitfield-type'):
+                self.assertEqual(transformer.text(field.child_by_field_name('declarator')), 'named')
+                continue
+            base = field.child_by_field_name('type')
+            self.assertEqual(transformer.base_type(base)['unsafe'], 'c_anonymous_bitfield_type')
+            self.assertEqual(transformer.declared_type(field, field.child_by_field_name('declarator'))['unsafe'],
+                             'c_anonymous_bitfield_type')
+        output, report = transformer.run()
+        self.assertEqual(output, source)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['summary']['heap_buffers'], 0)
+
+    def test_c_anonymous_bitfield_malformed_unknown_or_short_type_fails_closed(self):
+        broken = (
+            'struct S { T:0; };',
+            'struct S { ns::__u32 :32; };',
+            'struct S { __u32 :; };',
+            'struct S { __u32 :(1+); };',
+            'struct S { __u32 :sizeof(; };',
+            'struct S { unsigned + int :1; };',
+            'struct S { __u32 :24 };',
+            'struct S { __u32 :24, named:8; };',
+            'struct S { __u32 named:(1+); };',
+            'struct S { __u32 :24; __u32 broken:(1+); };',
+            'struct S { __u32 :24; }; void f( {',
+            'struct S { float :3; };',
+            'struct S { double :3; };',
+            'struct S { void :3; };',
+            'struct S { __u32 __attribute__((unknown_nso_attribute)) :24; };',
+        )
+        for source in broken:
+            with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source)
+            self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_does_not_parse')
+
+    def test_c_anonymous_bitfield_aggregate_alias_slots_remain_unsafe(self):
+        source = GLIB_HOST + r'''
+typedef unsigned int __u32;
+struct Bits { __u32 :24; const char *text; };
+typedef struct Bits BitsAlias;
+static const BitsAlias item={"FridaBitfieldSlot"};
+'''
+        output, report = self.transform(source)
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['summary']['expected_pointer_patches'], 0)
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
+        self.assertEqual({s['reason'] for s in report['skipped']}, {'bitfield_aggregate'})
+        self.assertEqual(report['parser_normalization']['kind_counts']['anonymous-bitfield-type'], 1)
+
+    def test_bitfield_literal_and_sizeof_resource_uses_remain_compiletime(self):
+        for language, names in (('c', ('', 'named')), ('cpp', ('named',))):
+            for name in names:
+                source = GLIB_HOST + r'''
+typedef unsigned int __u32;
+static const unsigned char gumjs_bitfield_bytecode[]={70,114,105,100,97};
+struct MarkerBits { __u32 NAME:sizeof("FridaBitfieldWidth"); };
+struct ResourceBits { __u32 NAME:sizeof(gumjs_bitfield_bytecode); };
+const unsigned char *bytes(void){return gumjs_bitfield_bytecode;}
+'''
+                source = source.replace('NAME', name)
+                with self.subTest(language=language, name=name):
+                    output, report = self.transform(source, language)
+                    self.assertEqual(output, source.encode())
+                    self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
+                    self.assertEqual(report['summary']['resources_transformed'], 0)
+                    reasons = {s['reason'] for s in report['skipped']}
+                    self.assertIn('bitfield_width_compile_time_context', reasons)
+                    self.assertIn('resource_reference_bitfield_width_compile_time_context', reasons)
+                    expected = 2 if language == 'c' and not name else 0
+                    self.assertEqual(report['parser_normalization']['kind_counts'].get('anonymous-bitfield-type', 0), expected)
+
+    def test_c_anonymous_bitfield_hidden_original_type_resource_is_wholly_skipped(self):
+        source = GLIB_HOST + r'''
+static const unsigned char gumjs_hidden_bitfield_bytecode[]={70,114,105,100,97};
+struct Bits { gumjs_hidden_bitfield_bytecode :24; };
+const unsigned char *bytes(void){return gumjs_hidden_bitfield_bytecode;}
+'''
+        output, report = self.transform(source)
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['summary']['resources_transformed'], 0)
+        self.assertEqual({s['reason'] for s in report['skipped']}, {'resource_reference_hidden_compiler_context'})
+
+    def test_host_c_anonymous_bitfield_layout_zero_width_and_runtime_bytes(self):
+        source = GLIB_HOST + r'''
+struct Bits {
+  unsigned int low:3;
+  unsigned int :5;
+  unsigned int high:8;
+  unsigned int :0;
+  unsigned int tail;
+};
+_Static_assert(sizeof(struct Bits)==2*sizeof(unsigned int),"bitfield size");
+_Static_assert(__builtin_offsetof(struct Bits,tail)==sizeof(unsigned int),"zero-width boundary");
+const char *name(void){return "FridaBitfieldRuntime";}
+int main(void){
+  struct Bits bits={0};
+  unsigned int word=0;
+  bits.low=5; bits.high=0xa6; bits.tail=0x11223344;
+  __builtin_memcpy(&word,&bits,sizeof(word));
+  require(word==(5U|(0xa6U<<8)) && bits.tail==0x11223344U);
+  require(strcmp(name(),EXPECTED)==0 && name()==name());
+  return 0;
+}
+'''
+        source = source.replace('EXPECTED', c_string('FridaBitfieldRuntime'))
+        self.compile_run(source)
+        output, report = self.transform(source)
+        self.assertEqual(report['skipped'], [])
+        self.assertEqual(report['parser_normalization']['kind_counts']['anonymous-bitfield-type'], 2)
+        self.assertEqual(report['summary']['heap_buffers'], 1)
+        self.assertIn(b'unsigned int :5;', output)
+        self.assertIn(b'unsigned int :0;', output)
+        self.compile_run(output)
+
+    def test_real_ndk_bpf_anonymous_bitfields_compile_both_architectures(self):
+        clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
+        if not clang:
+            if os.environ.get('STRING_OUTLINE_REQUIRE_ANDROID') == '1':
+                self.fail('set STRING_OUTLINE_ANDROID_CLANG to the installed NDK clang')
+            self.skipTest('installed Android NDK clang not selected')
+        source = r'''#include <linux/bpf.h>
+#include <stddef.h>
+typedef __SIZE_TYPE__ gsize;
+void *g_malloc(gsize);
+int g_once_init_enter(volatile gsize *);
+void g_once_init_leave(volatile gsize *,gsize);
+struct Bits { unsigned int low:3; unsigned int :5; unsigned int high:8; unsigned int :0; unsigned int tail; };
+_Static_assert(sizeof(struct Bits)==8,"bitfield object size");
+_Static_assert(offsetof(struct Bits,tail)==4,"zero-width bitfield boundary");
+_Static_assert(sizeof(((struct bpf_prog_info *)0)->type)==4,"real UAPI member width");
+const char *name(void){return "FridaBpfRuntime";}
+'''
+        with tempfile.TemporaryDirectory(prefix='nso-bpf-bitfields-') as directory:
+            root = Path(directory)
+            raw = root/'unit.c'
+            raw.write_text(source, encoding='utf-8')
+            for target, machine, elf_class in (('aarch64-linux-android21', 183, 2), ('armv7a-linux-androideabi19', 40, 1)):
+                with self.subTest(target=target):
+                    semantic = [clang, '--target='+target, '-std=gnu11', '-Oz', '-fPIC', '-Werror']
+                    unit = root/(target+'.i')
+                    baseline = root/(target+'.baseline.o')
+                    transformed = root/(target+'.outlined.i')
+                    outlined = root/(target+'.outlined.o')
+                    preprocessed = subprocess.run([*semantic, '-E', '-P', str(raw), '-o', str(unit)],
+                                                  capture_output=True, timeout=90)
+                    self.assertEqual(preprocessed.returncode, 0, preprocessed.stderr.decode(errors='replace'))
+                    original = unit.read_bytes()
+                    built = subprocess.run([*semantic, '-x', 'cpp-output', '-c', str(unit), '-o', str(baseline)],
+                                           capture_output=True, timeout=90)
+                    self.assertEqual(built.returncode, 0, built.stderr.decode(errors='replace'))
+                    transformer = outline.Transformer(original, 'c', str(unit))
+                    output, report = transformer.run()
+                    transformed.write_bytes(output)
+                    self.assertEqual(report['skipped'], [])
+                    regions = [r for r in transformer.shadow.regions if r['kind'] == 'anonymous-bitfield-type']
+                    self.assertGreater(len(regions), 2)
+                    self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                    for region in regions:
+                        declaration = original[region['field_start']:region['field_end']]
+                        self.assertTrue(declaration in output, declaration.decode(errors='replace'))
+                    built = subprocess.run([*semantic, '-x', 'cpp-output', '-c', str(transformed), '-o', str(outlined)],
+                                           capture_output=True, timeout=90)
+                    self.assertEqual(built.returncode, 0, built.stderr.decode(errors='replace'))
+                    for obj in (baseline, outlined):
+                        data = obj.read_bytes()
+                        self.assertEqual(data[:4], b'\x7fELF')
+                        self.assertEqual(data[4], elf_class)
+                        self.assertEqual(int.from_bytes(data[16:18], 'little'), 1)
+                        self.assertEqual(int.from_bytes(data[18:20], 'little'), machine)
+
     def test_cpp_anonymous_fixed_enum_shadow_preserves_anonymity_offsets_and_bytes(self):
         source = r'''
 typedef __SIZE_TYPE__ size_t;
