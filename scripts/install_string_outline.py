@@ -212,7 +212,8 @@ def prepare(source, version, state_dir, python, outliner, env_output=None,
               'response_format': response_format, 'dependencies': dependencies,
               'cpp_header_policy': CPP_HEADER_POLICY,
               'parser_pins': PARSER_PINS, 'wrapper_sha256': digest(wrapper_data),
-              'outliner_sha256': digest(outliner.read_bytes())}
+              'outliner_sha256': digest(outliner.read_bytes()),
+              'installer_sha256': digest(Path(__file__).read_bytes())}
     changed |= owned_write(config_path, json_bytes(config))
     environment = {'NIANCHU_STRING_OUTLINER': str(outliner),
                    'NIANCHU_STRING_OUTLINE_PYTHON': str(python),
@@ -224,6 +225,7 @@ def prepare(source, version, state_dir, python, outliner, env_output=None,
                 raise InstallationError(f'newline in environment value: {name}')
         changed |= merge_environment_file(env_output, environment)
     return {'schema': SCHEMA, 'action': 'prepare', 'status': 'prepared',
+            'wrapper_version': WRAPPER_VERSION, 'installer_sha256': config['installer_sha256'],
             'version': version, 'source_root': str(source), 'source_readonly': True,
             'changed': bool(changed), 'state_dir': str(state_dir), 'config': str(config_path),
             'environment': environment, 'dependencies': dependencies,
@@ -262,6 +264,8 @@ def validate_build(state_dir, build):
         raise InstallationError('unsupported installed configuration')
     if config.get('cpp_header_policy') != CPP_HEADER_POLICY:
         raise InstallationError('unsupported installed C++ header origin policy')
+    if config.get('installer_sha256') != digest(Path(__file__).read_bytes()):
+        raise InstallationError('installer changed after prepare; prepare again before building')
     wrapper = Path(config['wrapper'])
     if digest(wrapper.read_bytes()) != config['wrapper_sha256']:
         raise InstallationError('installed wrapper hash differs from configuration')
@@ -286,6 +290,8 @@ def validate_build(state_dir, build):
                             'rspfile': properties.get('rspfile'),
                             'rspfile_content': properties.get('rspfile_content')})
     return {'schema': SCHEMA, 'action': 'validate-build', 'status': 'validated',
+            'wrapper_version': WRAPPER_VERSION, 'installer_sha256': config['installer_sha256'],
+            'wrapper_sha256': config['wrapper_sha256'], 'outliner_sha256': config['outliner_sha256'],
             'version': config['version'], 'source_root': config['source_root'],
             'source_readonly': True, 'build_root': str(build), 'ninja_sha256': digest(ninja.read_bytes()),
             'config': str(config_path), 'compiler_rules': checked,

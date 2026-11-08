@@ -665,6 +665,151 @@ class _ParserShadow:
                     b'decltype', b'sizeof', b'alignof', b'int', b'char', b'void', b'long', b'short', b'float', b'double'}
             if expression:
                 self.replace(shadow, token.start, tokens[ending - 1].end, 'operator-id', b'_nso_op')
+        self.cpp_template_destructors(shadow)
+        self.cpp_anonymous_enums(shadow)
+
+    def cpp_anonymous_enums(self, shadow):
+        # A legal unscoped anonymous enum with a fixed underlying type has a
+        # missing name in the pinned grammar.  Validate the original base and
+        # complete body in a named probe, then omit only :base from the parser
+        # view.  The real enum stays anonymous and its type is marked unknown.
+        tokens = self.tokens
+        starts = {token.start: i for i, token in enumerate(tokens)}
+        tree = self.parser.parse(bytes(shadow))
+        integer_words = {b'bool', b'char', b'signed', b'unsigned', b'short', b'int', b'long',
+                         b'wchar_t', b'char8_t', b'char16_t', b'char32_t', b'__int128'}
+        excluded = (_PACK_LABEL_KEYWORDS | set(_KEYWORD_ALIASES) | _NULLABILITY | _TYPEOF | {
+            b'__underlying_type', b'__func__', b'__FUNCTION__', b'__PRETTY_FUNCTION__'}) - integer_words
+        for node in _walk(tree.root_node):
+            if node.type != 'enum_specifier':
+                continue
+            name, base, body = (node.child_by_field_name(field) for field in ('name', 'base', 'body'))
+            errors = [n for n in _walk_all(node) if n.type == 'ERROR' or n.is_missing]
+            if (name is None or name.type != 'type_identifier' or not name.is_missing
+                    or errors != [name] or base is None or body is None or body.type != 'enumerator_list'
+                    or base.has_error or body.has_error
+                    or base.type not in {'primitive_type', 'sized_type_specifier'}):
+                continue
+            index = starts.get(node.start_byte)
+            if (index is None or index + 2 >= len(tokens) or tokens[index].value != b'enum'
+                    or tokens[index + 1].value != b':' or tokens[index + 2].start != base.start_byte):
+                continue
+            base_tokens, cursor = [], index + 2
+            while cursor < len(tokens) and tokens[cursor].start < base.end_byte:
+                base_tokens.append(tokens[cursor])
+                cursor += 1
+            if not base_tokens or base_tokens[-1].end != base.end_byte:
+                continue
+            named_base = all(token.kind == 'identifier' and token.value in integer_words for token in base_tokens)
+            if not named_base:
+                cursor = 0
+                if len(base_tokens) >= 2 and [t.value for t in base_tokens[:2]] == [b':', b':']:
+                    cursor = 2
+                while cursor < len(base_tokens):
+                    token = base_tokens[cursor]
+                    if token.kind != 'identifier' or token.value in excluded:
+                        break
+                    cursor += 1
+                    if cursor == len(base_tokens):
+                        named_base = True
+                        break
+                    if [t.value for t in base_tokens[cursor:cursor + 2]] != [b':', b':']:
+                        break
+                    cursor += 2
+            if not named_base:
+                continue
+            raw_base = self.source[base.start_byte:base.end_byte]
+            raw_body = self.source[body.start_byte:body.end_byte]
+            probe = self.parser.parse(b'enum _nso_enum_probe : ' + raw_base + b' ' + raw_body + b';\n')
+            if probe.root_node.has_error:
+                continue
+            enums = [n for n in _walk(probe.root_node) if n.type == 'enum_specifier']
+            if len(enums) != 1 or enums[0].child_by_field_name('base') is None or enums[0].child_by_field_name('body') is None:
+                continue
+            start, end = tokens[index + 1].start, base.end_byte
+            self.replace(shadow, start, end, 'anonymous-enum-base')
+            self.regions[-1].update(enum_start=node.start_byte, enum_end=node.end_byte,
+                                    base_start=base.start_byte, base_end=base.end_byte,
+                                    body_start=body.start_byte, body_end=body.end_byte)
+
+    def cpp_template_destructors(self, shadow):
+        # The pinned grammar reads .~Local<Value>() as two comparisons, with a
+        # missing expression in ().  Validate a named template argument list
+        # and the complete projected member call; hide only <Value>, retaining
+        # the receiver, destructor name and empty argument list.  These names
+        # remain compiler/type safety contexts, never inferred object layouts.
+        tokens = self.tokens
+        starts = {token.start: i for i, token in enumerate(tokens)}
+        tree = self.parser.parse(bytes(shadow))
+        type_probes = {}
+        excluded = _PACK_LABEL_KEYWORDS | set(_KEYWORD_ALIASES) | _NULLABILITY | _TYPEOF | {
+            b'__underlying_type', b'__func__', b'__FUNCTION__', b'__PRETTY_FUNCTION__'}
+        for node in _walk(tree.root_node):
+            if node.type != 'destructor_name' or node.parent is None or node.parent.type != 'field_expression':
+                continue
+            field = node.parent
+            operator = field.child_by_field_name('operator')
+            if (field.child_by_field_name('field') != node or operator is None
+                    or self.source[operator.start_byte:operator.end_byte] not in {b'.', b'->'}):
+                continue
+            index = starts.get(node.start_byte)
+            if (index is None or index + 2 >= len(tokens) or tokens[index].value != b'~'
+                    or tokens[index + 1].kind != 'identifier' or tokens[index + 1].end != node.end_byte
+                    or tokens[index + 2].value != b'<'):
+                continue
+            opening, cursor = index + 2, index + 3
+            named_arguments = True
+            while cursor < len(tokens):
+                # A simple (possibly qualified) name only: no values, nested
+                # templates, decltype/typeof, literals or function operands can
+                # disappear behind this projection.
+                if cursor + 1 < len(tokens) and [t.value for t in tokens[cursor:cursor + 2]] == [b':', b':']:
+                    cursor += 2
+                if cursor >= len(tokens) or tokens[cursor].kind != 'identifier' or tokens[cursor].value in excluded:
+                    named_arguments = False
+                    break
+                cursor += 1
+                while cursor + 1 < len(tokens) and [t.value for t in tokens[cursor:cursor + 2]] == [b':', b':']:
+                    cursor += 2
+                    if cursor >= len(tokens) or tokens[cursor].kind != 'identifier' or tokens[cursor].value in excluded:
+                        named_arguments = False
+                        break
+                    cursor += 1
+                if not named_arguments or cursor >= len(tokens) or tokens[cursor].value != b',':
+                    break
+                cursor += 1
+            if (not named_arguments or cursor + 2 >= len(tokens) or tokens[cursor].value != b'>'
+                    or tokens[cursor + 1].value != b'(' or self.pairs.get(cursor + 1) != cursor + 2):
+                continue
+            start, end = tokens[opening].start, tokens[cursor].end
+            template = self.source[tokens[index + 1].start:end]
+            if template not in type_probes:
+                probe = self.parser.parse(b'using _nso_destructor_type_probe = ' + template + b';\n')
+                arguments = next((n for n in _walk(probe.root_node) if n.type == 'template_argument_list'), None)
+                types = [n for n in arguments.named_children if n.type != 'comment'] if arguments is not None else []
+                type_probes[template] = (not probe.root_node.has_error and bool(types)
+                                        and all(n.type == 'type_descriptor' for n in types))
+            if not type_probes[template]:
+                continue
+            finish = tokens[cursor + 2].end
+            projected = (bytes(shadow[field.start_byte:start]) + _padded(self.source[start:end])
+                         + bytes(shadow[end:finish]))
+            probe = self.parser.parse(b'void _nso_destructor_call_probe(){' + projected + b';}\n')
+            statements = [n for n in _walk(probe.root_node) if n.type == 'expression_statement']
+            if probe.root_node.has_error or len(statements) != 1:
+                continue
+            expressions = [n for n in statements[0].named_children if n.type != 'comment']
+            if len(expressions) != 1 or expressions[0].type != 'call_expression':
+                continue
+            call = expressions[0]
+            function = call.child_by_field_name('function')
+            arguments = call.child_by_field_name('arguments')
+            destructor = function.child_by_field_name('field') if function is not None else None
+            if (function is None or function.type != 'field_expression' or destructor is None
+                    or destructor.type != 'destructor_name' or arguments is None
+                    or any(n.type != 'comment' for n in arguments.named_children)):
+                continue
+            self.replace(shadow, start, end, 'template-destructor')
 
     def member_type_probe(self, source, at, require_type):
         tree = self.parser.parse(source)
@@ -758,7 +903,19 @@ class _ParserShadow:
         if self.language != 'cpp':
             return
         for region in self.regions:
-            if region['kind'] not in {'deleted-function', 'member-pointer', 'operator-id'}:
+            if region['kind'] == 'anonymous-enum-base':
+                node = self.tree.root_node.descendant_for_byte_range(region['enum_start'], region['enum_end'])
+                chain = (node, *_parents(node))
+                owner = next((n for n in chain if n.type == 'enum_specifier'
+                              and n.start_byte == region['enum_start'] and n.end_byte == region['enum_end']), None)
+                body = owner.child_by_field_name('body') if owner is not None else None
+                if (owner is None or owner.child_by_field_name('name') is not None
+                        or owner.child_by_field_name('base') is not None or body is None
+                        or (body.start_byte, body.end_byte) != (region['body_start'], region['body_end'])):
+                    raise Unsupported('cpp_anonymous_enum_context')
+                self.attachments.setdefault(owner.id, []).append(region)
+                continue
+            if region['kind'] not in {'deleted-function', 'member-pointer', 'operator-id', 'template-destructor'}:
                 continue
             at = region['end'] if region['kind'] == 'member-pointer' else region['start']
             node = self.tree.root_node.descendant_for_byte_range(at, min(at + 1, len(self.source)))
@@ -774,6 +931,12 @@ class _ParserShadow:
                     self.type_contexts.setdefault(owner.id, []).append(region)
             else:
                 owner = next((n for n in chain if n.type == 'call_expression'), None)
+                if region['kind'] == 'template-destructor':
+                    function = owner.child_by_field_name('function') if owner is not None else None
+                    destructor = function.child_by_field_name('field') if function is not None else None
+                    if (function is None or function.type != 'field_expression' or destructor is None
+                            or destructor.type != 'destructor_name'):
+                        raise Unsupported('cpp_template_destructor_context')
                 if owner is not None:
                     self.attachments.setdefault(owner.id, []).append(region)
 
@@ -788,7 +951,7 @@ class _ParserShadow:
 
     def attributes(self, node):
         kinds = {'attribute', 'nullability', 'asm-declarator'}
-        return bool(self.within(node, kinds) or any(n.id in self.attachments for n in _walk(node)))
+        return bool(self.within(node, kinds) or any(self.attached(n, kind) for n in _walk(node) for kind in kinds))
 
     def hidden_tokens(self, region):
         start = bisect_right(self.starts, region['start']) - 1
@@ -1072,10 +1235,12 @@ class Transformer:
                     self.skip_region(start, region['start'] + token.end, 'skipped_header_origin',
                                      'numeric-resource', ', '.join(region['origins']))
         for region in self.shadow.regions:
-            if region['kind'] not in {'attribute', 'typeof', 'builtin-type', 'asm-declarator'}:
+            if region['kind'] not in {'attribute', 'typeof', 'builtin-type', 'asm-declarator', 'template-destructor', 'anonymous-enum-base'}:
                 continue
             reason = {'attribute': 'attribute_context', 'typeof': 'compile_time_or_type_context',
-                      'builtin-type': 'compile_time_or_type_context', 'asm-declarator': 'assembly_context'}[region['kind']]
+                      'builtin-type': 'compile_time_or_type_context', 'asm-declarator': 'assembly_context',
+                      'template-destructor': 'compile_time_or_type_context',
+                      'anonymous-enum-base': 'compile_time_or_type_context'}[region['kind']]
             tokens = self.shadow.hidden_tokens(region)
             i = 0
             while i < len(tokens):
@@ -1204,6 +1369,8 @@ class Transformer:
                 return _shape('void', spelling='void')
             return _shape('scalar', spelling=name)
         if node.type == 'enum_specifier':
+            if self.shadow.attached(node, 'anonymous-enum-base'):
+                return _shape(unsafe='cpp_fixed_underlying_anonymous_enum')
             return _shape('scalar', spelling=self.text(node))
         if node.type in {'type_identifier', 'qualified_identifier'}:
             record = self._lookup_type_record(node, self.text(node))
@@ -1519,6 +1686,10 @@ class Transformer:
         return None
 
     def compiletime_reason(self, node):
+        # Enumerators remain constant expressions even when a nested sizeof
+        # would otherwise receive the generic size/alignment classification.
+        if any(parent.type == 'enumerator' for parent in _parents(node)):
+            return 'enum_value_compile_time_context'
         for parent in _parents(node):
             if parent.type in {'declaration', 'field_declaration', 'function_definition'} and self.shadow.attached(parent, 'deleted-function'):
                 return 'deleted_function_context'
@@ -1526,6 +1697,8 @@ class Transformer:
                 return 'cpp_member_pointer_type_context'
             if parent.type == 'call_expression' and self.shadow.attached(parent, 'operator-id'):
                 return 'cpp_explicit_operator_call'
+            if parent.type == 'call_expression' and self.shadow.attached(parent, 'template-destructor'):
+                return 'cpp_template_destructor_call'
             if parent.type in {'sizeof_expression', 'alignof_expression', 'alignof', 'offsetof_expression'}:
                 return 'sizeof_or_alignment_context'
             if parent.type in {'gnu_asm_expression', 'asm_statement'}:
@@ -1807,7 +1980,7 @@ class Transformer:
                 self.skip(variable['node'], 'resource_reference_header_origin', 'numeric-resource', variable['name'])
                 continue
             hidden_reference = next((r for r in self.shadow.regions
-                                     if r['kind'] in {'attribute', 'typeof', 'builtin-type', 'asm-declarator'}
+                                     if r['kind'] in {'attribute', 'typeof', 'builtin-type', 'asm-declarator', 'template-destructor', 'anonymous-enum-base'}
                                      and any(t.kind == 'identifier' and t.value == variable['name'].encode('utf-8')
                                              for t in self.shadow.hidden_tokens(r))), None)
             if hidden_reference is not None:
@@ -1828,6 +2001,9 @@ class Transformer:
                     continue
                 if node.parent is not None and node.parent.type == 'qualified_identifier':
                     unsafe = 'qualified_resource_reference'
+                    break
+                if any(parent.type == 'enumerator' for parent in _parents(node)):
+                    unsafe = 'resource_reference_enum_value_compile_time_context'
                     break
                 sizeof = next((p for p in _parents(node) if p.type in {'sizeof_expression', 'alignof_expression'}), None)
                 if sizeof is not None:

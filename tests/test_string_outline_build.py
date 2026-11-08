@@ -501,6 +501,49 @@ class OutlineBuildTests(unittest.TestCase):
             self.assertIn('clean_env[k] = v', scrub)
             self.assertIn('host_machine=host_machine', compat)
 
+    def test_prepare_and_build_validation_record_tool_byte_identities(self):
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        expected = {
+            'installer_sha256': hashlib.sha256((ROOT/'scripts/install_string_outline.py').read_bytes()).hexdigest(),
+            'wrapper_sha256': hashlib.sha256((ROOT/'scripts/string_outline_compiler.py').read_bytes()).hexdigest(),
+            'outliner_sha256': hashlib.sha256(self.outliner.read_bytes()).hexdigest(),
+        }
+        for name, digest in expected.items():
+            self.assertEqual(config[name], digest)
+            self.assertEqual(self.install[name], digest)
+        self.assertEqual(self.install['wrapper_version'], installer.WRAPPER_VERSION)
+        lines = []
+        for language in ('c', 'cpp'):
+            command = shlex.join(self.install['compiler_prefix'] +
+                                 ['--language', language, '--build-root', str(self.build), '--', 'clang'])
+            lines += ['rule ' + language + '_COMPILER', ' command = ' + command + ' -c $in -o $out']
+        ninja = self.build/'build.ninja'
+        ninja.write_text('\n'.join(lines), encoding='utf-8')
+        before = {path: path.read_bytes() for path in (self.config, self.outliner, ninja)}
+        result = installer.validate_build(self.state, self.build)
+        self.assertEqual(result['wrapper_version'], installer.WRAPPER_VERSION)
+        for name, digest in expected.items():
+            self.assertEqual(result[name], digest)
+        for path, data in before.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_build_validation_rejects_missing_or_drifted_installer_identity(self):
+        original = self.config.read_bytes()
+        for value in (None, '0'*64):
+            with self.subTest(value=value):
+                config = json.loads(original)
+                if value is None:
+                    config.pop('installer_sha256')
+                else:
+                    config['installer_sha256'] = value
+                self.config.write_text(json.dumps(config), encoding='utf-8')
+                before = self.config.read_bytes()
+                with self.assertRaisesRegex(installer.InstallationError, 'installer changed after prepare'):
+                    installer.validate_build(self.state, self.build)
+                self.assertEqual(self.config.read_bytes(), before)
+                self.assertEqual(self.calls(), [])
+        self.config.write_bytes(original)
+
     def test_environment_merge_preserves_unrelated_single_and_multiline_values(self):
         original = ('UNRELATED=keep this value\nMULTILINE<<END_NIANCHU\n'
                     'NIANCHU_STRING_OUTLINER=not-an-assignment-in-a-multiline-value\nEND_NIANCHU\n'
