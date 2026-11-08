@@ -4,8 +4,10 @@
 Integration API: outline_source(source, language='c', filename='<input>') returns
 (output_bytes, report).  OutlineError carries a failure report.  This does not
 rename APIs, rewrite binaries, invoke a compiler, or infer safety from branding.
-The emitted code needs the translation unit's existing GLib declarations, and
-GNU C/C++ constructor, typeof, and trap support.  No includes/macros are emitted.
+The emitted code uses the translation unit's existing GLib types. Android
+runtime policies restore through anonymous mmap and internal atomics before
+GLib initialization; the host diagnostic policy uses GLib allocation/once.
+GNU C/C++ constructor, typeof, and trap support are required. No includes/macros are emitted.
 """
 
 import argparse
@@ -140,7 +142,7 @@ def _padded(original, replacement=b''):
 
 
 _LINE_MARKER = re.compile(rb'(?m)^[ \t]*#[ \t]*(?:line[ \t]+)?([0-9]+)[ \t]+("(?:\\[^\r\n]|[^"\\\r\n])*")((?:[ \t]+[0-9]+)*)[ \t]*(?:\r?\n|$)')
-_SYNTHETIC_ORIGIN = b'#line 1 "<nianchu-outline-generated>"\n'
+_SYNTHETIC_ORIGIN = b'# 1 "<nianchu-outline-generated>"\n'
 # Labels must be identifier tokens for both GNU C and Clang C/C++.  Reserved
 # compiler spellings (__foo / _Foo) and either language's keywords can otherwise
 # be ignored by Clang while GCC still performs the modeled stack operation.
@@ -277,12 +279,14 @@ class _HeaderOrigins:
                 raise Unsupported('cpp_opaque_root_too_broad')
             if value not in self.roots:
                 self.roots.append(value)
-        if not self.roots:
-            self.view = source
-            return
+        # Exact compiler line markers are audited parser trivia even when no
+        # external-header opacity is selected (including every C input).
         lexical = _lex(source, include_directives=True)
         self.markers = [token for token in lexical
                         if token.kind == 'directive' and _LINE_MARKER.fullmatch(token.value)]
+        if not self.roots:
+            self.view = source
+            return
         if not self.markers:
             raise Unsupported('cpp_opaque_requires_line_markers')
         origin = None
@@ -405,9 +409,9 @@ class _ParserShadow:
         # The pinned grammar misinterprets legal #line between enumerators as
         # a missing comma.  Audited line directives are parser trivia only;
         # their original bytes and physical origin remain in compiler output.
-        if cpp_opaque_roots:
-            for marker in self.origins.markers:
-                self.replace(shadow, marker.start, marker.end, 'line-marker')
+        self.marker_ranges = {(m.start, m.end) for m in self.origins.markers}
+        for marker in self.origins.markers:
+            self.replace(shadow, marker.start, marker.end, 'line-marker')
         typeops = []
         for i, token in enumerate(self.tokens):
             if token.kind != 'identifier':
@@ -474,6 +478,7 @@ class _ParserShadow:
             self.cpp_declarators(shadow)
             self.view = bytes(shadow)
         elif language == 'c':
+            self.c_anonymous_enums(shadow)
             self.c_anonymous_bitfields(shadow)
             self.view = bytes(shadow)
         preliminary = parser.parse(self.view)
@@ -815,18 +820,125 @@ class _ParserShadow:
         self.cpp_template_destructors(shadow)
         self.cpp_anonymous_enums(shadow)
 
+    @staticmethod
+    def enum_integer_base(tokens, language):
+        # Syntax parsers accept impossible combinations such as long char or
+        # unsigned unsigned.  Only concrete integer specifiers (and Bionic's
+        # size_t spelling) may disappear, never an arbitrary typedef/expression.
+        words = [t.value for t in tokens]
+        if not words or any(t.kind != 'identifier' for t in tokens):
+            return False
+        single = {b'size_t', b'_Bool'} if language == 'c' else {
+            b'size_t', b'bool', b'wchar_t', b'char8_t', b'char16_t', b'char32_t'}
+        if len(words) == 1 and words[0] in single:
+            return True
+        if any(word not in {b'char', b'signed', b'unsigned', b'short', b'int', b'long', b'__int128'} for word in words):
+            return False
+        if (words.count(b'signed') + words.count(b'unsigned') > 1
+                or any(words.count(word) > 1 for word in (b'char', b'short', b'int', b'__int128'))
+                or words.count(b'long') > 2):
+            return False
+        if b'char' in words or b'__int128' in words:
+            return len(words) == 1 + words.count(b'signed') + words.count(b'unsigned')
+        return not (b'short' in words and b'long' in words)
+
+    def enum_source_view(self, shadow, start, end):
+        """Audit the whole probe span, including trivia skipped by _lex.
+
+        Only globally recognized exact line markers may differ from source.
+        Every other directive is rejected, including pragmas in erased gaps;
+        a local parse after deleting :base must never hide macro/layout state.
+        """
+        original = self.source[start:end]
+        expected = bytearray(original)
+        for token in _lex(original, include_directives=True):
+            if token.kind != 'directive':
+                continue
+            absolute = (start + token.start, start + token.end)
+            if absolute not in self.marker_ranges:
+                raise Unsupported(self.language + '_anonymous_enum_directive')
+            expected[token.start:token.end] = _padded(token.value)
+        view = bytes(shadow[start:end])
+        return view if view == bytes(expected) else None
+
+    def c_anonymous_enums(self, shadow):
+        # C's pinned grammar loses the *entire* fixed-underlying enum to ERROR,
+        # so candidates must come from significant tokens, not recovered ASTs.
+        # C++ validates only the original fixed base and complete body after
+        # audited line-marker trivia; C validates the :base projection and its
+        # exact body/value signature again in the complete translation unit.
+        tokens, cpp_parser = self.tokens, None
+        for index, token in enumerate(tokens):
+            if (token.value != b'enum' or token.kind != 'identifier'
+                    or index + 2 >= len(tokens) or tokens[index + 1].value != b':'):
+                continue
+            opening = index + 2
+            while opening < len(tokens) and tokens[opening].kind == 'identifier':
+                opening += 1
+            base_tokens = tokens[index + 2:opening]
+            if (opening >= len(tokens) or tokens[opening].value != b'{'
+                    or not self.enum_integer_base(base_tokens, 'c')):
+                continue
+            closing = self.pairs.get(opening)
+            if closing is None:
+                continue
+            enum_start, enum_end = token.start, tokens[closing].end
+            base_start, base_end = base_tokens[0].start, base_tokens[-1].end
+            body_start, body_end = tokens[opening].start, tokens[closing].end
+            original = self.enum_source_view(shadow, enum_start, enum_end)
+            if original is None:
+                continue
+            if cpp_parser is None:
+                from tree_sitter import Language, Parser
+                import tree_sitter_cpp
+                cpp_parser = Parser(Language(tree_sitter_cpp.language()))
+            # Insert a probe name only; retain all enum/colon/base/body gaps.
+            insertion = b' _nso_enum_probe '
+            enum_at = token.end - enum_start
+            named_source = original[:enum_at] + insertion + original[enum_at:] + b';\n'
+            named_tree = cpp_parser.parse(named_source)
+            enums = [n for n in named_tree.root_node.named_children if n.type != 'comment']
+            if named_tree.root_node.has_error or len(enums) != 1 or enums[0].type != 'enum_specifier':
+                continue
+            named_enum = enums[0]
+            name, base, body = (named_enum.child_by_field_name(field) for field in ('name', 'base', 'body'))
+            delta = len(insertion) - enum_start
+            if (name is None or named_source[name.start_byte:name.end_byte] != b'_nso_enum_probe'
+                    or base is None or base.type not in {'primitive_type', 'sized_type_specifier', 'type_identifier'}
+                    or (base.start_byte, base.end_byte) != (base_start + delta, base_end + delta)
+                    or body is None or body.type != 'enumerator_list'
+                    or (body.start_byte, body.end_byte) != (body_start + delta, body_end + delta)
+                    or (named_enum.start_byte, named_enum.end_byte) != (0, enum_end + delta)):
+                continue
+            start, end = tokens[index + 1].start, base_end
+            projected = (bytes(shadow[enum_start:start]) + _padded(self.source[start:end])
+                         + bytes(shadow[end:enum_end]))
+            projected_tree = self.parser.parse(projected + b';\n')
+            enums = [n for n in projected_tree.root_node.named_children if n.type != 'comment']
+            if projected_tree.root_node.has_error or len(enums) != 1 or enums[0].type != 'enum_specifier':
+                continue
+            enum = enums[0]
+            body = enum.child_by_field_name('body')
+            if (enum.child_by_field_name('name') is not None or enum.child_by_field_name('base') is not None
+                    or (enum.start_byte, enum.end_byte) != (0, enum_end - enum_start)
+                    or body is None or body.type != 'enumerator_list'
+                    or (body.start_byte, body.end_byte) != (body_start - enum_start, body_end - enum_start)
+                    or not any(n.type == 'enumerator' for n in body.named_children)):
+                continue
+            self.replace(shadow, start, end, 'anonymous-enum-base')
+            self.regions[-1].update(enum_start=enum_start, enum_end=enum_end,
+                                    base_start=base_start, base_end=base_end,
+                                    body_start=body_start, body_end=body_end,
+                                    body_view=bytes(shadow[body_start:body_end]),
+                                    body_signature=self.bitfield_signature(body, -enum_start))
+
     def cpp_anonymous_enums(self, shadow):
-        # A legal unscoped anonymous enum with a fixed underlying type has a
-        # missing name in the pinned grammar.  Validate the original base and
-        # complete body in a named probe, then omit only :base from the parser
-        # view.  The real enum stays anonymous and its type is marked unknown.
+        # A legal unscoped anonymous enum has only a missing name in C++.
+        # Validate both a named original and an anonymous projection, preserving
+        # every original body/value node and absolute offset, never its layout.
         tokens = self.tokens
         starts = {token.start: i for i, token in enumerate(tokens)}
         tree = self.parser.parse(bytes(shadow))
-        integer_words = {b'bool', b'char', b'signed', b'unsigned', b'short', b'int', b'long',
-                         b'wchar_t', b'char8_t', b'char16_t', b'char32_t', b'__int128'}
-        excluded = (_PACK_LABEL_KEYWORDS | set(_KEYWORD_ALIASES) | _NULLABILITY | _TYPEOF | {
-            b'__underlying_type', b'__func__', b'__FUNCTION__', b'__PRETTY_FUNCTION__'}) - integer_words
         for node in _walk(tree.root_node):
             if node.type != 'enum_specifier':
                 continue
@@ -835,7 +947,7 @@ class _ParserShadow:
             if (name is None or name.type != 'type_identifier' or not name.is_missing
                     or errors != [name] or base is None or body is None or body.type != 'enumerator_list'
                     or base.has_error or body.has_error
-                    or base.type not in {'primitive_type', 'sized_type_specifier'}):
+                    or base.type not in {'primitive_type', 'sized_type_specifier', 'type_identifier'}):
                 continue
             index = starts.get(node.start_byte)
             if (index is None or index + 2 >= len(tokens) or tokens[index].value != b'enum'
@@ -845,39 +957,42 @@ class _ParserShadow:
             while cursor < len(tokens) and tokens[cursor].start < base.end_byte:
                 base_tokens.append(tokens[cursor])
                 cursor += 1
-            if not base_tokens or base_tokens[-1].end != base.end_byte:
+            if (not base_tokens or base_tokens[-1].end != base.end_byte
+                    or not self.enum_integer_base(base_tokens, 'cpp')):
                 continue
-            named_base = all(token.kind == 'identifier' and token.value in integer_words for token in base_tokens)
-            if not named_base:
-                cursor = 0
-                if len(base_tokens) >= 2 and [t.value for t in base_tokens[:2]] == [b':', b':']:
-                    cursor = 2
-                while cursor < len(base_tokens):
-                    token = base_tokens[cursor]
-                    if token.kind != 'identifier' or token.value in excluded:
-                        break
-                    cursor += 1
-                    if cursor == len(base_tokens):
-                        named_base = True
-                        break
-                    if [t.value for t in base_tokens[cursor:cursor + 2]] != [b':', b':']:
-                        break
-                    cursor += 2
-            if not named_base:
+            original = self.enum_source_view(shadow, node.start_byte, node.end_byte)
+            if original is None:
                 continue
-            raw_base = self.source[base.start_byte:base.end_byte]
-            raw_body = self.source[body.start_byte:body.end_byte]
-            probe = self.parser.parse(b'enum _nso_enum_probe : ' + raw_base + b' ' + raw_body + b';\n')
-            if probe.root_node.has_error:
-                continue
+            signature = self.bitfield_signature(body)
+            insertion = b' _nso_enum_probe '
+            enum_at = tokens[index].end - node.start_byte
+            named_source = original[:enum_at] + insertion + original[enum_at:] + b';\n'
+            probe = self.parser.parse(named_source)
             enums = [n for n in _walk(probe.root_node) if n.type == 'enum_specifier']
-            if len(enums) != 1 or enums[0].child_by_field_name('base') is None or enums[0].child_by_field_name('body') is None:
+            if probe.root_node.has_error or len(enums) != 1:
+                continue
+            named_base, named_body = (enums[0].child_by_field_name(field) for field in ('base', 'body'))
+            delta = len(insertion) - node.start_byte
+            if (named_base is None or (named_base.start_byte, named_base.end_byte) != (base.start_byte + delta, base.end_byte + delta)
+                    or named_body is None or (named_body.start_byte, named_body.end_byte) != (body.start_byte + delta, body.end_byte + delta)
+                    or self.bitfield_signature(named_body, delta) != signature):
                 continue
             start, end = tokens[index + 1].start, base.end_byte
+            projected = (bytes(shadow[node.start_byte:start]) + _padded(self.source[start:end])
+                         + bytes(shadow[end:node.end_byte]))
+            probe = self.parser.parse(projected + b';\n')
+            enums = [n for n in _walk(probe.root_node) if n.type == 'enum_specifier']
+            if probe.root_node.has_error or len(enums) != 1:
+                continue
+            projected_body = enums[0].child_by_field_name('body')
+            if projected_body is None or self.bitfield_signature(projected_body, -node.start_byte) != signature:
+                continue
             self.replace(shadow, start, end, 'anonymous-enum-base')
             self.regions[-1].update(enum_start=node.start_byte, enum_end=node.end_byte,
                                     base_start=base.start_byte, base_end=base.end_byte,
-                                    body_start=body.start_byte, body_end=body.end_byte)
+                                    body_start=body.start_byte, body_end=body.end_byte,
+                                    body_view=bytes(shadow[body.start_byte:body.end_byte]),
+                                    body_signature=signature)
 
     def cpp_template_destructors(self, shadow):
         # The pinned grammar reads .~Local<Value>() as two comparisons, with a
@@ -1047,8 +1162,9 @@ class _ParserShadow:
                         break
 
     def bind_cpp_regions(self):
-        if self.language != 'cpp':
-            return
+        # anonymous-enum-base is shared by both grammars; all other kinds here
+        # remain C++ only.  A successful local probe cannot excuse TU errors or
+        # a body/value subtree changed by any other shadow normalization.
         for region in self.regions:
             if region['kind'] == 'anonymous-enum-base':
                 node = self.tree.root_node.descendant_for_byte_range(region['enum_start'], region['enum_end'])
@@ -1056,13 +1172,15 @@ class _ParserShadow:
                 owner = next((n for n in chain if n.type == 'enum_specifier'
                               and n.start_byte == region['enum_start'] and n.end_byte == region['enum_end']), None)
                 body = owner.child_by_field_name('body') if owner is not None else None
-                if (owner is None or owner.child_by_field_name('name') is not None
-                        or owner.child_by_field_name('base') is not None or body is None
-                        or (body.start_byte, body.end_byte) != (region['body_start'], region['body_end'])):
-                    raise Unsupported('cpp_anonymous_enum_context')
+                if (owner is None or owner.has_error or owner.child_by_field_name('name') is not None
+                        or owner.child_by_field_name('base') is not None or body is None or body.type != 'enumerator_list'
+                        or (body.start_byte, body.end_byte) != (region['body_start'], region['body_end'])
+                        or self.bitfield_signature(body) != region['body_signature']
+                        or self.view[body.start_byte:body.end_byte] != region['body_view']):
+                    raise Unsupported(self.language + '_anonymous_enum_context')
                 self.attachments.setdefault(owner.id, []).append(region)
                 continue
-            if region['kind'] not in {'deleted-function', 'member-pointer', 'operator-id', 'template-destructor'}:
+            if self.language != 'cpp' or region['kind'] not in {'deleted-function', 'member-pointer', 'operator-id', 'template-destructor'}:
                 continue
             at = region['end'] if region['kind'] == 'member-pointer' else region['start']
             node = self.tree.root_node.descendant_for_byte_range(at, min(at + 1, len(self.source)))
@@ -1256,8 +1374,11 @@ def _shape(kind='unknown', **kwargs):
 
 
 class Transformer:
-    def __init__(self, source, language, filename, cpp_opaque_roots=()):
+    def __init__(self, source, language, filename, cpp_opaque_roots=(), runtime_policy='glib'):
         self.source = source
+        if runtime_policy not in {'glib', 'android-arm64', 'android-arm'}:
+            raise ValueError('unsupported runtime policy')
+        self.runtime_policy = runtime_policy
         self.language = language
         self.filename = filename
         self.cpp_opaque_roots = tuple(cpp_opaque_roots)
@@ -1269,13 +1390,20 @@ class Transformer:
             'language': language, 'input': filename, 'ok': False,
             'input_sha256': hashlib.sha256(source).hexdigest(),
             'parser_dependencies': dict(PARSER_PINS), 'xor_key': XOR_KEY,
-            'constructor_priority': 101, 'entries': [], 'occurrences': [],
+            'constructor_priority': 101, 'runtime_policy': runtime_policy,
+            'entries': [], 'occurrences': [],
             'static_objects': [], 'skipped': [], 'failures': [],
             'assumptions': ['UTF-8 execution character set',
                             'GNU C/C++ constructor/typeof/trap support',
                             'existing GLib allocation/once declarations',
                             'constructors of consumers run after priority 101'],
         }
+        if runtime_policy != 'glib':
+            self.report['assumptions'] = ['UTF-8 execution character set',
+                                          'Android Linux mmap/mmap2 syscall ABI',
+                                          'GNU inline assembly and 32-bit atomics',
+                                          'arena retained for process lifetime',
+                                          'constructors of consumers run after priority 101']
         self.edits = []
         self.edit_keys = set()
         self.entries = []
@@ -1520,7 +1648,7 @@ class Transformer:
             return _shape('scalar', spelling=name)
         if node.type == 'enum_specifier':
             if self.shadow.attached(node, 'anonymous-enum-base'):
-                return _shape(unsafe='cpp_fixed_underlying_anonymous_enum')
+                return _shape(unsafe=self.language + '_fixed_underlying_anonymous_enum')
             return _shape('scalar', spelling=self.text(node))
         if node.type in {'type_identifier', 'qualified_identifier'}:
             record = self._lookup_type_record(node, self.text(node))
@@ -2244,6 +2372,10 @@ class Transformer:
                 code = ('\nstatic volatile gsize %s = 0;\n'
                         'if (g_once_init_enter (&%s)) {\n%s\n'
                         '  g_once_init_leave (&%s, 1);\n}\n') % (once, once, self.patch_code(obj, index, True), once)
+                if self.runtime_policy != 'glib':
+                    code = code.replace('volatile gsize', 'volatile unsigned int')
+                    code = code.replace('g_once_init_enter', self.prefix + '_enter')
+                    code = code.replace('g_once_init_leave', self.prefix + '_leave')
                 self.edit(variable['node'].end_byte, variable['node'].end_byte, code)
             else:
                 global_objects.append((index, obj))
@@ -2252,13 +2384,76 @@ class Transformer:
                 'scope': 'local-static' if local else 'file',
                 'expected_slots': len(paths), 'paths': paths,
                 'const_storage_removed': bool(const_nodes),
-                'initialization': 'declaration-following-g_once' if local else 'constructor-101',
+                'initialization': ('declaration-following-atomic-once' if self.runtime_policy != 'glib'
+                                   else 'declaration-following-g_once') if local else 'constructor-101',
             })
         return global_objects
+
+    def android_bootstrap(self):
+        """Allocate one lifetime arena without GLib/TLS or allocator bootstrap."""
+        if self.runtime_policy == 'android-arm64':
+            syscall = r'''
+  register long a0 __asm__("x0") = 0;
+  register long a1 __asm__("x1") = (long) n;
+  register long a2 __asm__("x2") = 3;
+  register long a3 __asm__("x3") = 0x22;
+  register long a4 __asm__("x4") = -1;
+  register long a5 __asm__("x5") = 0;
+  register long nr __asm__("x8") = 222;
+  __asm__ volatile ("svc #0" : "+r" (a0) : "r" (a1), "r" (a2), "r" (a3), "r" (a4), "r" (a5), "r" (nr) : "memory", "cc");
+'''
+            enter = r'''unsigned int expected, status;
+  __asm__ volatile ("1: ldaxr %w0, [%2]\n\tcbnz %w0, 2f\n\tstxr %w1, %w3, [%2]\n\tcbnz %w1, 1b\n\tb 3f\n2: clrex\n3:"
+    : "=&r" (expected), "=&r" (status) : "r" (p), "r" (2U) : "memory", "cc");
+  if (expected == 0U) return 1;'''
+        else:
+            syscall = r'''
+  register long a0 __asm__("r0") = 0;
+  register long a1 __asm__("r1") = (long) n;
+  register long a2 __asm__("r2") = 3;
+  register long a3 __asm__("r3") = 0x22;
+  register long a4 __asm__("r4") = -1;
+  register long a5 __asm__("r5") = 0;
+  register long nr __asm__("r6") = 192;
+  __asm__ volatile ("push {r7}\n\tmov r7, r6\n\tsvc #0\n\tpop {r7}" : "+r" (a0) : "r" (a1), "r" (a2), "r" (a3), "r" (a4), "r" (a5), "r" (nr) : "memory", "cc");
+'''
+            enter = r'''unsigned int expected = 0;
+  if (__atomic_compare_exchange_n (p, &expected, 2U, 0, 2, 2)) return 1;'''
+        return r'''
+static int %(p)s_enter (volatile unsigned int * p)
+{
+  %(enter)s
+  while (__atomic_load_n (p, 2) != 1U) { __asm__ volatile ("yield" ::: "memory"); }
+  return 0;
+}
+static void %(p)s_leave (volatile unsigned int * p, unsigned int value)
+{
+  __atomic_store_n (p, value, 3);
+}
+static volatile unsigned int %(p)s_arena_once;
+static unsigned char * %(p)s_arena;
+static void * %(p)s_map (unsigned long n)
+{
+%(syscall)s
+  if ((unsigned long) a0 >= (unsigned long) -4095L) __builtin_trap ();
+  return (void *) a0;
+}
+static void * %(p)s_alloc (unsigned long offset)
+{
+  if (%(p)s_enter (&%(p)s_arena_once)) {
+    %(p)s_arena = (unsigned char *) %(p)s_map (%(size)dUL);
+    %(p)s_leave (&%(p)s_arena_once, 1U);
+  }
+  return %(p)s_arena + offset;
+}
+''' % {'p': self.prefix, 'syscall': syscall, 'enter': enter,
+       'size': sum(len(e['value']) for e in self.entries)}
 
     def runtime(self, global_objects):
         prelude = []
         suffix = []
+        android = self.runtime_policy != 'glib'
+        offset = 0
         for entry in self.entries:
             element = entry['element']
             getter = entry['getter']
@@ -2269,7 +2464,7 @@ class Transformer:
             prelude.append('static const %s * %s (void);' % (element, getter))
             cache = self.prefix + '_cache_' + str(index)
             once = self.prefix + '_once_' + str(index)
-            suffix.append('''static volatile gsize %(once)s = 0;
+            body = '''static volatile %(once_type)s %(once)s = 0;
 static %(element)s * %(cache)s;
 static const %(element)s * %(getter)s (void)
 {
@@ -2283,7 +2478,15 @@ static const %(element)s * %(getter)s (void)
   }
   return %(cache)s;
 }
-''' % dict(once=once, element=element, cache=cache, getter=getter, symbol=symbol, length=len(entry['value'])))
+''' % dict(once=once, once_type='unsigned int' if android else 'gsize',
+           element=element, cache=cache, getter=getter, symbol=symbol, length=len(entry['value']))
+            if android:
+                body = body.replace('g_once_init_enter', self.prefix + '_enter')
+                body = body.replace('g_once_init_leave', self.prefix + '_leave')
+                body = body.replace('g_malloc (%dU)' % len(entry['value']),
+                                    '%s_alloc (%dUL)' % (self.prefix, offset))
+                offset += len(entry['value'])
+            suffix.append(body)
         constructor = ['static void __attribute__ ((constructor (101))) %s_init (void)' % self.prefix, '{']
         for entry in self.entries:
             constructor.append('  (void) %s();' % entry['getter'])
@@ -2291,7 +2494,8 @@ static const %(element)s * %(getter)s (void)
             constructor.append('  {\n' + self.patch_code(obj, index) + '\n  }')
         constructor.append('}')
         suffix.append('\n'.join(constructor))
-        return ('\n'.join(prelude) + '\n').encode(), ('\n' + '\n'.join(suffix) + '\n').encode()
+        bootstrap = self.android_bootstrap() if android else ''
+        return (bootstrap + '\n'.join(prelude) + '\n').encode(), ('\n' + '\n'.join(suffix) + '\n').encode()
 
     def validate_packing(self, nodes):
         """Track pack state in source order, including physical opaque headers.
@@ -2355,8 +2559,8 @@ static const %(element)s * %(getter)s (void)
                 continue
             raw = self.source[node.start_byte:node.end_byte]
             if node.type == 'preproc_call':
-                if re.match(rb'^\s*#\s*(?:line\s+)?[0-9]+\s+"[^"\r\n]*"(?:\s+[0-9]+)*\s*$', raw):
-                    continue
+                # Only exact lexical _LINE_MARKER directives were blanked
+                # before parsing.  Do not accept a second, looser marker form.
                 # Literal pack pragmas are retained for the semantic compiler
                 # and tracked separately so dependent aggregate slots stay
                 # unknown.  Other layout/macro directives remain fail-closed.
@@ -2398,7 +2602,9 @@ static const %(element)s * %(getter)s (void)
         output = b''.join(parts)
         if self.entries:
             prelude, suffix = self.runtime(global_objects)
-            if self.cpp_opaque_roots:
+            if self.cpp_opaque_roots or self.shadow.origins.markers:
+                # A numeric marker without GNU flag 3 resets system-header
+                # status for generated helpers; standard #line does not.
                 output = _SYNTHETIC_ORIGIN + prelude + output + b'\n' + _SYNTHETIC_ORIGIN + suffix
             else:
                 output = prelude + output + suffix
@@ -2412,7 +2618,8 @@ static const %(element)s * %(getter)s (void)
             'id': e['id'], 'kind': e['kind'], 'byte_length': len(e['value']),
             'sha256': hashlib.sha256(e['value']).hexdigest(), 'getter': e['getter'],
             'placeholder': e['symbol'], 'occurrences': e['occurrences'],
-            'initialization': 'heap-g_once-constructor-101', 'element_type': e['element'],
+            'initialization': ('heap-g_once-constructor-101' if self.runtime_policy == 'glib'
+                               else 'anonymous-mmap-atomic-constructor-101'), 'element_type': e['element'],
         } for e in self.entries]
         self.report['summary'] = {
             'literal_candidates': self.literal_candidates,
@@ -2436,23 +2643,23 @@ static const %(element)s * %(getter)s (void)
         return output, self.report
 
 
-def outline_source(source, language='c', filename='<input>', cpp_opaque_roots=()):
+def outline_source(source, language='c', filename='<input>', cpp_opaque_roots=(), runtime_policy='glib'):
     if language not in {'c', 'cpp'}:
         raise ValueError('language must be c or cpp')
     if isinstance(source, str):
         source = source.encode('utf-8')
     if not isinstance(source, bytes):
         raise TypeError('source must be bytes or str')
-    return Transformer(source, language, filename, cpp_opaque_roots).run()
+    return Transformer(source, language, filename, cpp_opaque_roots, runtime_policy).run()
 
 
-def outline_file(input_path, output_path, report_path, language='c', cpp_opaque_roots=()):
+def outline_file(input_path, output_path, report_path, language='c', cpp_opaque_roots=(), runtime_policy='glib'):
     input_path, output_path, report_path = map(Path, (input_path, output_path, report_path))
     resolved = [p.resolve() for p in (input_path, output_path, report_path)]
     if len(set(resolved)) != 3:
         raise ValueError('input, output, and report paths must be distinct')
     try:
-        output, report = outline_source(input_path.read_bytes(), language, str(input_path), cpp_opaque_roots)
+        output, report = outline_source(input_path.read_bytes(), language, str(input_path), cpp_opaque_roots, runtime_policy)
     except OutlineError as error:
         report_path.write_text(json.dumps(error.report, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
         # A failed invocation must not leave a stale successful output to compile.
@@ -2472,9 +2679,10 @@ def main(argv=None):
     parser.add_argument('--language', choices=('c', 'cpp'), required=True)
     parser.add_argument('--cpp-opaque-root', action='append', default=[], type=Path,
                         help='Explicit external C++ header subtree for a balanced parser-only boundary')
+    parser.add_argument('--runtime-policy', choices=('glib', 'android-arm64', 'android-arm'), default='glib')
     args = parser.parse_args(argv)
     try:
-        report = outline_file(args.input, args.output, args.report, args.language, args.cpp_opaque_root)
+        report = outline_file(args.input, args.output, args.report, args.language, args.cpp_opaque_root, args.runtime_policy)
     except (OutlineError, OSError, ValueError) as error:
         print('string outlining failed: ' + str(error), file=sys.stderr)
         return 1

@@ -45,6 +45,7 @@ p.add_argument('--output', required=True)
 p.add_argument('--report', required=True)
 p.add_argument('--language', required=True, choices=('c','cpp'))
 p.add_argument('--cpp-opaque-root', action='append', default=[])
+p.add_argument('--runtime-policy', default='glib')
 a = p.parse_args()
 source = Path(a.input).read_bytes()
 result = source.replace(b'"frida-outline-me"', b'"nianchu-outline-me"')
@@ -236,7 +237,10 @@ class OutlineBuildTests(unittest.TestCase):
         self.assertEqual(pre[3:3 + len(original_prefix)], original_prefix)
         self.assertEqual(final[3:3 + len(original_prefix)], original_prefix)
         self.assertIn('-E', pre)
-        self.assertIn('-P', pre)
+        self.assertNotIn('-P', pre)
+        self.assertTrue(report['compiler_line_origins_preserved'])
+        self.assertIsNone(report['cpp_header_policy'])
+        self.assertEqual(report['cpp_opaque_roots'], [])
         for removed in ('-MD', '-MMD', '-MF', '-MT', '-MQ'):
             self.assertNotIn(removed, final)
         self.assertIn('-ffile-prefix-map=../subprojects/frida-core=../subprojects/nianchu-core', pre)
@@ -757,18 +761,95 @@ class OutlineBuildTests(unittest.TestCase):
         self.assertEqual(wrapper.cpp_header_origin_roots([
             str(binary), '--sysroot=' + str(toolchain / 'sysroot'), '-c', str(source)], unit, config, self.build), roots)
 
-    def test_cpp_wrapped_line_marker_suppression_rejected(self):
-        source = self.core / 'origin.cpp'
-        source.write_text('int value;\n', encoding='utf-8')
+    def test_c_cpp_direct_line_marker_suppression_removed(self):
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                suffix = '.c' if language == 'c' else '.cpp'
+                source = self.core / ('direct origins' + suffix)
+                source.write_text('const char *message="frida-outline-me";\n', encoding='utf-8')
+                output = self.output.with_name('direct origins' + suffix + '.o')
+                report = self.assert_success(self.run_wrapper(
+                    ['-P', '-c', str(source), '-o', str(output)], language=language))
+                self.assertIn('-P', report['original_expanded_argv'])
+                self.assertNotIn('-P', report['preprocess_expanded_argv'])
+                self.assertTrue(report['compiler_line_origins_preserved'])
+
+    def test_c_cpp_wrapped_line_marker_suppression_rejected(self):
         variants = (['-Wp,-P'], ['-Wp,-MD,ignored.d,-P'], ['-Xpreprocessor', '-P'],
-                    ['-Xclang', '-P'], ['-Xclang=-P'])
-        for index, wrapped in enumerate(variants):
-            with self.subTest(wrapped=wrapped):
-                output = self.output.with_name('origin-' + str(index) + '.o')
-                result = self.run_wrapper([*wrapped, '-c', str(source), '-o', str(output)], language='cpp')
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('wrapped -P is unsupported', result.stderr)
+                    ['-Xclang', '-P'], ['-Xpreprocessor=-P'], ['-Xclang=-P'])
+        for language in ('c', 'cpp'):
+            suffix = '.c' if language == 'c' else '.cpp'
+            source = self.core / ('origin' + suffix)
+            source.write_text('int value;\n', encoding='utf-8')
+            for index, wrapped in enumerate(variants):
+                with self.subTest(language=language, wrapped=wrapped):
+                    output = self.output.with_name('origin-' + str(index) + suffix + '.o')
+                    result = self.run_wrapper([*wrapped, '-c', str(source), '-o', str(output)], language=language)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('wrapped -P is unsupported', result.stderr)
         self.assertFalse(any('-E' in call['expanded'] for call in self.calls()))
+
+    def test_real_c_system_header_diagnostics_preserved_and_owned_errors_rejected(self):
+        compiler = os.environ.get('STRING_OUTLINE_CC') or shutil.which('gcc') or shutil.which('cc')
+        if not compiler:
+            if os.environ.get('STRING_OUTLINE_REQUIRE_HOST') == '1':
+                self.fail('native C compiler required for system-header diagnostics')
+            self.skipTest('native C compiler unavailable for system-header diagnostics')
+        self.outliner = ROOT / 'scripts' / 'outline_elf_strings.py'
+        self.prepare(allow_stub=False)
+        system = self.tools / 'system diagnostic.h'
+        system.write_text(
+            '#pragma GCC system_header\n'
+            'static inline int system_result(void) { return missing_system_declaration(); }\n',
+            encoding='utf-8')
+        declarations = ('typedef unsigned long gsize; void *g_malloc(gsize);\n'
+                        'int g_once_init_enter(volatile gsize *);\n'
+                        'void g_once_init_leave(volatile gsize *, gsize);\n')
+        source = self.core / 'system diagnostic.c'
+        source.write_text('#include "system diagnostic.h"\n' + declarations +
+                          'const char *message(void) { return "FridaSystemDiagnostic"; }\n'
+                          'int result(void) { return system_result(); }\n', encoding='utf-8')
+        original = source.read_bytes()
+        common = ['-std=gnu99', '-O2', '-Werror=implicit-function-declaration',
+                  '-I', str(self.tools)]
+        reference = self.tools / 'system-reference.o'
+        plain = subprocess.run([compiler, *common, '-c', str(source), '-o', str(reference)],
+                               cwd=self.tools, capture_output=True, text=True, timeout=60)
+        self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
+        output = self.output.with_name('system diagnostic.c.o')
+        result = self.run_wrapper([*common, '-MD', '-MF', str(output.with_suffix('.d')),
+                                   '-c', str(source), '-o', str(output)], compiler=[compiler])
+        report = self.assert_success(result)
+        self.assertTrue(report['compiler_line_origins_preserved'])
+        self.assertTrue(report['outliner_report']['ok'])
+        self.assertNotIn('-P', report['preprocess_expanded_argv'])
+        self.assertNotIn(b'FridaSystemDiagnostic', output.read_bytes())
+        self.assertEqual(source.read_bytes(), original)
+        dependency = output.with_suffix('.d').read_text(encoding='utf-8')
+        self.assertIn('system\\ diagnostic.h', dependency)
+        self.assertNotIn('preprocessed.c', dependency)
+        self.assertNotIn('outlined.c', dependency)
+        source.write_text(original.decode('utf-8') +
+                          'int owned_error(void) { return missing_owned_declaration(); }\n', encoding='utf-8')
+        failed = self.run_wrapper([*common, '-c', str(source), '-o', str(output)], compiler=[compiler])
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('missing_owned_declaration', failed.stderr)
+        self.assertEqual(self.reports()[-1]['status'], 'failed')
+        self.assertTrue(self.reports()[-1]['source_unchanged'])
+
+    def test_android_runtime_policy_follows_effective_target(self):
+        for target, policy in [('aarch64-none-linux-android21', 'android-arm64'),
+                               ('armv7a-none-linux-androideabi19', 'android-arm'),
+                               ('x86_64-linux-gnu', 'glib')]:
+            self.assertEqual(wrapper.outline_runtime_policy(['clang', '-target', target]), policy)
+            self.assertEqual(wrapper.outline_runtime_policy(['clang', '--target=' + target]), policy)
+        self.assertEqual(wrapper.outline_runtime_policy(['aarch64-linux-android21-clang.exe']), 'android-arm64')
+        self.assertEqual(wrapper.outline_runtime_policy(['clang', '-target', 'aarch64-linux-android21',
+                                                        '-target', 'armv7a-linux-androideabi19']), 'android-arm')
+        with self.assertRaises(wrapper.OutlineBuildError):
+            wrapper.outline_runtime_policy(['clang', '-target', 'x86_64-linux-android21'])
+        with self.assertRaises(wrapper.OutlineBuildError):
+            wrapper.outline_runtime_policy(['clang', '-target'])
 
     def test_real_android_arm64_and_compat_arm32_c_cpp_object_compilation(self):
         clang = os.environ.get('NIANCHU_TEST_CLANG') or shutil.which('clang')

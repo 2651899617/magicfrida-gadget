@@ -654,6 +654,38 @@ def regular_output(path, directory):
         raise OutlineBuildError(f'compiler/outliner output is missing or not an isolated regular file: {path}')
 
 
+def outline_runtime_policy(argv):
+    """Use bootstrap-safe recovery for the compiler's actual Android target."""
+    target = None
+    index = 1
+    while index < len(argv):
+        value = argv[index]
+        if value in {'-target', '--target'}:
+            if index + 1 >= len(argv):
+                raise OutlineBuildError('missing compiler target')
+            target = argv[index + 1]
+            index += 2
+        elif value.startswith(('--target=', '-target=')):
+            target = value.split('=', 1)[1]
+            index += 1
+        elif value in _VALUE_OPTIONS:
+            index += 2
+        else:
+            index += 1
+    if target is None:
+        driver = Path(argv[0]).name
+        match = re.match(r'((?:aarch64|armv7a)-linux-android(?:eabi)?\d+)-clang(?:\+\+)?(?:\.exe)?$', driver)
+        if match:
+            target = match.group(1)
+    if target is None or 'android' not in target:
+        return 'glib'
+    if target.startswith('aarch64-'):
+        return 'android-arm64'
+    if target.startswith(('arm-', 'armv7a-', 'armv7-')):
+        return 'android-arm'
+    raise OutlineBuildError('unsupported Android bootstrap target: ' + target)
+
+
 def compile_outlined(command, arguments, unit, config, cwd, build_root):
     report_dir = Path(config['report_dir']) / config['version']
     key = sha256(json.dumps([str(cwd), str(unit.source), str(unit.output), unit.language]).encode())[:24]
@@ -685,14 +717,13 @@ def compile_outlined(command, arguments, unit, config, cwd, build_root):
             edits, dependencies = dependency_edits(arguments.flat)
             preprocessing_edits = {**edits, **{index: [] for index in unit.output_indices}}
             for index, value in enumerate(arguments.flat):
-                if value == '-c' or (unit.language == 'cpp' and value == '-P'):
+                if value in {'-c', '-P'}:
                     preprocessing_edits[index] = []
-                if unit.language == 'cpp' and (
-                        (value.startswith('-Wp,') and '-P' in value[4:].split(',')) or
+                if ((value.startswith('-Wp,') and '-P' in value[4:].split(',')) or
                         (value in {'-Xpreprocessor', '-Xclang'} and index + 1 < len(arguments.flat)
                          and arguments.flat[index + 1] == '-P') or
                         value in {'-Xpreprocessor=-P', '-Xclang=-P'}):
-                    raise OutlineBuildError('C++ outlining requires compiler line origins; wrapped -P is unsupported')
+                    raise OutlineBuildError('outlining requires compiler line origins; wrapped -P is unsupported')
             depfile = absolute_path(dependencies.file or str(unit.output.with_suffix('.d')), cwd)
             if depfile.resolve() == unit.source.resolve() or depfile.resolve() == unit.output.resolve():
                 raise OutlineBuildError('dependency file aliases original source or object')
@@ -702,11 +733,10 @@ def compile_outlined(command, arguments, unit, config, cwd, build_root):
             maps = prefix_map_flags(config, cwd, unit)
             dependency_args = [dependencies.mode, '-MF', str(depfile), *targets, *dependencies.switches]
             cpp_roots = cpp_header_origin_roots(arguments.flat, unit, config, cwd)
-            preprocess_extra = [*maps, '-E', *(['-P'] if unit.language == 'c' else []),
-                                '-o', str(preprocessed), *dependency_args]
+            preprocess_extra = [*maps, '-E', '-o', str(preprocessed), *dependency_args]
             report['cpp_header_policy'] = CPP_HEADER_POLICY if unit.language == 'cpp' else None
             report['cpp_opaque_roots'] = cpp_roots
-            report['compiler_line_origins_preserved'] = unit.language == 'cpp'
+            report['compiler_line_origins_preserved'] = True
             preprocess_command = arguments.render(preprocessing_edits, preprocess_extra, directory, 'preprocess')
             report['preprocess_command'] = preprocess_command
             report['preprocess_expanded_argv'] = arguments.expanded(preprocessing_edits, preprocess_extra)
@@ -720,9 +750,12 @@ def compile_outlined(command, arguments, unit, config, cwd, build_root):
             report['depfile'] = str(depfile)
             report['depfile_sha256'] = augment_depfile(depfile, [unit.source, Path(config['wrapper']),
                                                               Path(config['config_path']), Path(config['outliner'])])
+            runtime_policy = outline_runtime_policy(arguments.flat)
+            report['outline_runtime_policy'] = runtime_policy
             outline_command = [config['python'], '-I', config['outliner'],
                                '--input', str(preprocessed), '--output', str(transformed),
                                '--report', str(outline_report), '--language', unit.language,
+                               *(['--runtime-policy', runtime_policy] if runtime_policy != 'glib' else []),
                                *[value for root in cpp_roots for value in ('--cpp-opaque-root', root)]]
             report['outline_command'] = outline_command
             result = subprocess.run(outline_command, cwd=directory)

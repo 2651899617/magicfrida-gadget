@@ -99,6 +99,55 @@ class OutlineTests(unittest.TestCase):
                 return result.stdout
             return binary.read_bytes()
 
+    def test_android_bootstrap_avoids_glib_before_init(self):
+        source = GLIB_HOST + '\nconst char *global="frida:rpc";\n' \
+                 'const char *local(void){static const char *value="FridaLocal";return value;}\n'
+        for policy in ('android-arm64', 'android-arm'):
+            output, report = outline.outline_source(source, runtime_policy=policy)
+            self.assertEqual(report['runtime_policy'], policy)
+            generated = output[output.index(b'static int nso_'):output.index(b'typedef unsigned long gsize;')]
+            self.assertNotIn(b'g_malloc', generated)
+            self.assertNotIn(b'g_once_init_enter', generated)
+            self.assertIn(b'svc #0', generated)
+            self.assertIn(b'_arena_once', output)
+            self.assertIn(b'anonymous-mmap-atomic-constructor-101',
+                          json.dumps(report).encode())
+            self.assertEqual(report['static_objects'][1]['initialization'],
+                             'declaration-following-atomic-once')
+        with self.assertRaises(ValueError):
+            outline.outline_source(source, runtime_policy='unsupported')
+
+    def test_android_bootstrap_links_without_glib_or_atomic_helpers(self):
+        clang = os.environ.get('STRING_OUTLINE_ANDROID_CLANG')
+        if not clang:
+            self.skipTest('installed Android NDK compiler not selected')
+        source = ('typedef unsigned long gsize;\n'
+                  'void *g_malloc(gsize); int g_once_init_enter(volatile gsize *);\n'
+                  'void g_once_init_leave(volatile gsize *,gsize);\n'
+                  'const char *global="frida:rpc";\n'
+                  'static const unsigned char gumjs_test_source_code[]={102,114,105,100,97,0};\n'
+                  'const char *local(void){static const char *value="FridaLocal";return value;}\n'
+                  'int check(void){return global[0]!=102 || local()[10]!=0 || '
+                  'gumjs_test_source_code[0]!=102;}\n')
+        with tempfile.TemporaryDirectory(prefix='nso-bootstrap-') as directory:
+            root = Path(directory)
+            for policy, target in [('android-arm64', 'aarch64-none-linux-android21'),
+                                   ('android-arm', 'armv7a-none-linux-androideabi19')]:
+                for language in ('c', 'cpp'):
+                    with self.subTest(policy=policy, language=language):
+                        output, report = outline.outline_source(source, language, runtime_policy=policy)
+                        unit = root / (policy + language + '.i')
+                        executable = unit.with_suffix('.elf')
+                        unit.write_bytes(output + b'\nint main(void){return check();}\n')
+                        command = [clang, '-target', target, '-std=gnu11' if language == 'c' else '-std=gnu++11',
+                                   '-x', 'cpp-output' if language == 'c' else 'c++-cpp-output',
+                                   '-O2', '-fno-stack-protector', '-fno-builtin', '-fno-exceptions',
+                                   '-fno-rtti', '-nostdlib', '-static', '-Wl,-e,main', str(unit), '-o', str(executable)]
+                        result = subprocess.run(command, capture_output=True, timeout=60)
+                        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                        self.assertEqual(executable.read_bytes()[:4], b'\x7fELF')
+                        self.assertEqual(report['runtime_policy'], policy)
+
     def test_dynamic_original_bytes_and_determinism(self):
         source = GLIB_HOST + '\nconst char *name(void) { return "Frida:rpc"; }\n'
         expected = c_string('Frida:rpc')
@@ -404,6 +453,180 @@ static const unsigned char (*all)[5]=&gumjs_test_bytecode;
         self.assertTrue(report['ok'])
         self.assertIn(b'# 1 "frida-source.c"', output)
 
+    def assert_marker_shadow(self, source, language):
+        transformer = outline.Transformer(source, language, 'line-markers.i')
+        self.assertFalse(transformer.root.has_error)
+        self.assertEqual(transformer.shadow.origins.roots, [])
+        self.assertEqual(transformer.shadow.origins.ranges, [])
+        expected = bytearray(source)
+        for region in transformer.shadow.regions:
+            self.assertIn(region['kind'], {'line-marker', 'anonymous-enum-base'})
+            expected[region['start']:region['end']] = outline._padded(source[region['start']:region['end']])
+        self.assertEqual(transformer.shadow.view, bytes(expected))
+        self.assertEqual(len(transformer.shadow.view), len(source))
+        self.assertEqual([i for i, byte in enumerate(transformer.shadow.view) if byte in (10, 13)],
+                         [i for i, byte in enumerate(source) if byte in (10, 13)])
+        output, report = transformer.run()
+        self.assertEqual(output, source)
+        self.assertTrue(report['ok'])
+        self.assertNotIn('cpp_header_boundary', report)
+        return transformer
+
+    def test_no_roots_line_markers_between_enumerators_preserve_crlf_offsets_and_bytes(self):
+        source = r'''# 1 "sdk.h" 1 3
+ enum Named {
+   FIRST=1,
+ # 42 "sdk.h" 2 3
+   SECOND=sizeof("FridaEnumCompileTime"),
+ #line 43 "sdk.h"
+   THIRD=3,
+ };
+'''.replace('\n', '\r\n').encode()
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                transformer = self.assert_marker_shadow(source, language)
+                self.assertEqual(len(transformer.shadow.origins.markers), 3)
+                enum = next(n for n in transformer.nodes if n.type == 'enum_specifier')
+                values = [n for n in enum.child_by_field_name('body').named_children if n.type == 'enumerator']
+                self.assertEqual(len(values), 3)
+                for node in values:
+                    name = node.child_by_field_name('name')
+                    self.assertEqual(name.start_byte, source.index(source[name.start_byte:name.end_byte]))
+                    value = node.child_by_field_name('value')
+                    self.assertEqual(transformer.shadow.view[value.start_byte:value.end_byte], source[value.start_byte:value.end_byte])
+
+    def test_fixed_enum_numeric_marker_gaps_preserve_body_signatures_and_original_tokens(self):
+        source = r'''typedef unsigned long size_t;
+ enum /* lexical trivia */
+ # 10 "sdk.h" 1 3
+ : // still anonymous
+ # 11 "sdk.h"
+ unsigned
+ #line 12 "sdk.h"
+ long
+ # 13 "sdk.h" 2
+ {
+   FIRST=-1UL,
+ # 14 "sdk.h" 3
+   SECOND=sizeof("FridaEnumCompileTime"),
+ };
+'''.replace('\n', '\r\n').encode()
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                transformer = self.assert_marker_shadow(source, language)
+                self.assertEqual(len(transformer.shadow.origins.markers), 5)
+                regions = [r for r in transformer.shadow.regions if r['kind'] == 'anonymous-enum-base']
+                self.assertEqual(len(regions), 1)
+                region = regions[0]
+                enum = next(n for n in transformer.nodes if n.type == 'enum_specifier')
+                self.assertTrue(transformer.shadow.attached(enum, 'anonymous-enum-base'))
+                self.assertIsNone(enum.child_by_field_name('name'))
+                body = enum.child_by_field_name('body')
+                self.assertEqual((body.start_byte, body.end_byte), (region['body_start'], region['body_end']))
+                self.assertEqual(outline._ParserShadow.bitfield_signature(body), region['body_signature'])
+                self.assertEqual(transformer.shadow.view[body.start_byte:body.end_byte], region['body_view'])
+                self.assertEqual(enum.end_byte, region['enum_end'])
+                self.assertEqual(transformer.base_type(enum)['unsafe'], language + '_fixed_underlying_anonymous_enum')
+
+    def test_line_marker_lookalikes_inside_comments_and_raw_literals_are_not_shadowed(self):
+        source = r'''/*
+ # 1 "fake-comment.h" 3
+ */
+ const char *text=R"tag(
+ # 2 "fake-raw.h" 3
+ )tag";
+ # 3 "real-owned.cpp"
+ int value;
+'''.encode()
+        transformer = self.assert_marker_shadow(source, 'cpp')
+        self.assertEqual(len(transformer.shadow.origins.markers), 1)
+        self.assertIn(b'# 1 "fake-comment.h" 3', transformer.shadow.view)
+        self.assertIn(b'# 2 "fake-raw.h" 3', transformer.shadow.view)
+
+    def test_no_roots_line_markers_do_not_hide_unrelated_directives_or_parse_errors(self):
+        bad = ('#error unexpected\n', '#define VALUE 1\n', '#pragma unknown_vendor layout\n',
+               '# 3 "sdk.h" invalid_flag\n', '#line NEXT "sdk.h"\n', 'void broken( {\n')
+        for language in ('c', 'cpp'):
+            for extra in bad:
+                source = '# 1 "sdk.h" 1 3\nint good;\n' + extra + '# 2 "owned.c" 2\nint after;\n'
+                with self.subTest(language=language, extra=extra), self.assertRaises(outline.OutlineError) as caught:
+                    self.transform(source, language)
+                self.assertFalse(caught.exception.report['ok'])
+
+    def test_fixed_enum_non_marker_directives_in_all_head_gaps_are_rejected(self):
+        heads = ('enum\nDIRECTIVE:\nunsigned int', 'enum :\nDIRECTIVEunsigned int',
+                 'enum : unsigned\nDIRECTIVEint', 'enum : unsigned int\nDIRECTIVE')
+        directives = ('#error unexpected\n', '#define ENUM_BASE unsigned\n',
+                      '#pragma pack(push,1)\n', '#pragma unknown_vendor layout\n',
+                      '# 1 "sdk.h" invalid_flag\n')
+        for language in ('c', 'cpp'):
+            for head in heads:
+                for directive in directives:
+                    source = head.replace('DIRECTIVE', directive) + ' { X=1 };'
+                    with self.subTest(language=language, head=head, directive=directive), self.assertRaises(outline.OutlineError) as caught:
+                        self.transform(source, language)
+                    self.assertFalse(caught.exception.report['ok'])
+
+    def test_fixed_enum_paired_pack_gap_resource_slot_repro_fails_closed(self):
+        source = GLIB_HOST + r'''
+static const unsigned char gumjs_enum_bytecode[]={70,114,105,100,97};
+enum :
+#pragma pack(push,1)
+unsigned int { X=1 };
+struct S { char c; const unsigned char *p; };
+static const struct S slot={1,gumjs_enum_bytecode};
+enum :
+#pragma pack(pop)
+unsigned int { Y=2 };
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source, language)
+            report = caught.exception.report
+            self.assertFalse(report['ok'])
+            self.assertEqual(report['entries'], [])
+            self.assertEqual(report['occurrences'], [])
+            self.assertEqual(report['static_objects'], [])
+
+    def test_no_roots_numeric_origins_keep_visible_pack_state_and_unknown_resource_slots(self):
+        source = GLIB_HOST + r'''
+static const unsigned char gumjs_enum_bytecode[]={70,114,105,100,97};
+# 1 "packed-sdk.h" 1 3
+#pragma pack(push,1)
+struct S { char c; const unsigned char *p; };
+# 2 "owned.c" 2
+#pragma pack(pop)
+static const struct S slot={1,gumjs_enum_bytecode};
+'''
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                output, report = self.transform(source, language)
+                self.assertEqual(output, source.encode())
+                self.assertEqual(report['summary']['resources_transformed'], 0)
+                self.assertEqual(report['summary']['expected_pointer_patches'], 0)
+                self.assertEqual([s['reason'] for s in report['skipped']], ['resource_reference_aggregate_pragma_packing'])
+                self.assertEqual([e['effective_alignment'] for e in report['pragma_pack']['events']], [1, None])
+
+    def test_no_roots_generated_helpers_use_numeric_non_system_origins_preserving_source_markers(self):
+        source = ('# 1 "owned.c"\n' + GLIB_HOST
+                  + '# 20 "sdk.h" 1 3\nconst char *f(void){return "FridaGeneratedOrigin";}\n').encode()
+        for language in ('c', 'cpp'):
+            with self.subTest(language=language):
+                transformer = outline.Transformer(source, language, 'origins.i')
+                output, report = transformer.run()
+                self.assertTrue(report['ok'])
+                self.assertEqual(report['summary']['literal_occurrences_transformed'], 1)
+                self.assertNotIn('cpp_header_boundary', report)
+                self.assertTrue(output.startswith(b'# 1 "<nianchu-outline-generated>"\n'))
+                generated = outline._HeaderOrigins(output, ())
+                originals = {m.value for m in transformer.shadow.origins.markers}
+                self.assertTrue(originals.issubset({m.value for m in generated.markers}))
+                self.assertEqual(len(generated.markers), len(originals) + 2)
+                for marker in generated.markers:
+                    if b'<nianchu-outline-generated>' in marker.value:
+                        self.assertEqual(outline._LINE_MARKER.fullmatch(marker.value).group(3), b'')
+                self.assertEqual(generated.markers[-1].value, outline._SYNTHETIC_ORIGIN)
+
     def test_cpp_pointer_api_static_tables_and_raw_literal(self):
         size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
         host = GLIB_HOST.replace('typedef unsigned long gsize;', 'typedef %s gsize;' % size_type).replace('extern ', 'extern "C" ')
@@ -558,8 +781,11 @@ const char *raw = R"tag(__signed__ _Nullable __attribute__((packed)) typeof(inva
 '''.encode()
         transformer = outline.Transformer(source, 'cpp', 'tokens.ii')
         self.assertFalse(transformer.root.has_error)
-        self.assertEqual(transformer.shadow.view, source)
-        self.assertEqual(transformer.shadow.regions, [])
+        marker = source.splitlines(keepends=True)[0]
+        self.assertEqual(transformer.shadow.view,
+                         outline._padded(marker) + source[len(marker):])
+        self.assertEqual([region['kind'] for region in transformer.shadow.regions], ['line-marker'])
+        self.assertEqual(len(transformer.shadow.view), len(source))
         output, report = transformer.run()
         self.assertEqual(output, source)
         self.assertTrue(report['ok'])
@@ -1483,22 +1709,8 @@ const char *name(void){return "FridaBpfRuntime";}
                         self.assertEqual(int.from_bytes(data[16:18], 'little'), 1)
                         self.assertEqual(int.from_bytes(data[18:20], 'little'), machine)
 
-    def test_cpp_anonymous_fixed_enum_shadow_preserves_anonymity_offsets_and_bytes(self):
-        source = r'''
-typedef __SIZE_TYPE__ size_t;
-enum : size_t {
-  BIONIC_MULTIBYTE_RESULT_ILLEGAL_SEQUENCE = -1UL,
-  BIONIC_MULTIBYTE_RESULT_INCOMPLETE_SEQUENCE = -2UL,
-  BIONIC_MULTIBYTE_RESULT_NO_BYTES_CONSUMED = -3UL,
-};
-namespace owned {
-enum:unsigned char { SMALL=3 };
-void f(){enum
-:
-unsigned short { LOCAL=9 };}
-}
-'''.replace('\n', '\r\n').encode()
-        transformer = outline.Transformer(source, 'cpp', 'anonymous-enums.ii')
+    def assert_anonymous_enum_shadow(self, source, language):
+        transformer = outline.Transformer(source, language, 'anonymous-enums.i' if language == 'c' else 'anonymous-enums.ii')
         self.assertFalse(transformer.root.has_error)
         self.assertEqual(len(transformer.shadow.view), len(source))
         self.assertEqual([i for i, byte in enumerate(transformer.shadow.view) if byte in (10, 13)],
@@ -1513,11 +1725,68 @@ unsigned short { LOCAL=9 };}
         self.assertEqual(len(enums), 3)
         for node in enums:
             self.assertIsNone(node.child_by_field_name('name'))
+            self.assertIsNone(node.child_by_field_name('base'))
             self.assertTrue(transformer.shadow.attached(node, 'anonymous-enum-base'))
+            region = next(r for r in regions if r['enum_start'] == node.start_byte)
+            self.assertEqual(node.end_byte, region['enum_end'])
+            body = node.child_by_field_name('body')
+            self.assertEqual((body.start_byte, body.end_byte), (region['body_start'], region['body_end']))
+            self.assertEqual(outline._ParserShadow.bitfield_signature(body), region['body_signature'])
+            projected = transformer.shadow.view[node.start_byte:node.end_byte] + b';\n'
+            probe_enum = next(n for n in outline._walk(transformer.parser.parse(projected).root_node) if n.type == 'enum_specifier')
+            self.assertEqual(outline._ParserShadow.bitfield_signature(probe_enum.child_by_field_name('body'), -node.start_byte),
+                             region['body_signature'])
+            for value in [n.child_by_field_name('value') for n in body.named_children if n.type == 'enumerator']:
+                if value is not None:
+                    self.assertEqual(transformer.shadow.view[value.start_byte:value.end_byte], source[value.start_byte:value.end_byte])
         output, report = transformer.run()
         self.assertEqual(output, source)
         self.assertTrue(report['ok'])
         self.assertEqual(report['summary']['heap_buffers'], 0)
+
+    def test_cpp_anonymous_fixed_enum_shadow_preserves_anonymity_offsets_and_bytes(self):
+        source = r'''
+ typedef __SIZE_TYPE__ size_t;
+ enum : size_t {
+   BIONIC_MULTIBYTE_RESULT_ILLEGAL_SEQUENCE = -1UL,
+   BIONIC_MULTIBYTE_RESULT_INCOMPLETE_SEQUENCE = -2UL,
+   BIONIC_MULTIBYTE_RESULT_NO_BYTES_CONSUMED = -3UL,
+ };
+ namespace owned {
+ enum:unsigned char { SMALL=3 };
+ void f(){enum
+ :
+ unsigned short { LOCAL=9 };}
+ }
+'''.replace('\n', '\r\n').encode()
+        self.assert_anonymous_enum_shadow(source, 'cpp')
+
+    def test_c_anonymous_fixed_enum_shadow_preserves_anonymity_offsets_and_bytes(self):
+        source = r'''
+ typedef __SIZE_TYPE__ size_t;
+ enum : size_t {
+   BIONIC_MULTIBYTE_RESULT_ILLEGAL_SEQUENCE = -1UL,
+   BIONIC_MULTIBYTE_RESULT_INCOMPLETE_SEQUENCE = -2UL,
+   BIONIC_MULTIBYTE_RESULT_NO_BYTES_CONSUMED = -3UL,
+ };
+ typedef enum:unsigned char { SMALL=3 } ByteEnum;
+ void f(void){enum
+ :
+ unsigned short { LOCAL=9 };}
+'''.replace('\n', '\r\n').encode()
+        self.assert_anonymous_enum_shadow(source, 'c')
+
+    def test_c_anonymous_fixed_enum_integer_bases_are_supported(self):
+        bases = ('size_t', 'char', 'signed char', 'unsigned char', 'short', 'signed short int',
+                 'unsigned short', 'int', 'signed', 'unsigned', 'unsigned int', 'long', 'signed long int',
+                 'long unsigned int', 'long long', 'unsigned long long int', '_Bool',
+                 '__int128')
+        for base in bases:
+            source = 'typedef __SIZE_TYPE__ size_t; enum : %s { X=1 };' % base
+            with self.subTest(base=base):
+                output, report = self.transform(source, 'c')
+                self.assertEqual(output, source.encode())
+                self.assertEqual(report['parser_normalization']['kind_counts']['anonymous-enum-base'], 1)
 
     def test_cpp_anonymous_fixed_enum_types_and_alias_slots_remain_unknown(self):
         source = GLIB_HOST + r'''
@@ -1531,8 +1800,24 @@ static const ByteAlias *slot=(const ByteAlias *)"FridaAnonymousEnumSlot";
         self.assertEqual(report['summary']['expected_pointer_patches'], 0)
         self.assertEqual({s['reason'] for s in report['skipped']}, {'cpp_fixed_underlying_anonymous_enum'})
 
-    def test_cpp_enumerator_values_and_sizeof_resource_references_stay_compiletime(self):
-        for declaration in ('enum : unsigned long', 'enum Named : unsigned long', 'enum'):
+    def test_c_anonymous_fixed_enum_types_and_alias_slots_remain_unknown(self):
+        source = GLIB_HOST + r'''
+typedef __SIZE_TYPE__ size_t;
+typedef enum : unsigned char { BYTE_VALUE=1 } ByteEnum;
+typedef ByteEnum ByteAlias;
+static const ByteAlias *slot=(const ByteAlias *)"FridaAnonymousEnumSlot";
+typedef enum : size_t { LONG_VALUE=1 } SizeEnum;
+typedef SizeEnum SizeAlias;
+static const SizeAlias *wide_slot=(const SizeAlias *)"FridaAnonymousSizeEnumSlot";
+'''
+        output, report = self.transform(source, 'c')
+        self.assertEqual(output, source.encode())
+        self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
+        self.assertEqual(report['summary']['expected_pointer_patches'], 0)
+        self.assertEqual({s['reason'] for s in report['skipped']}, {'c_fixed_underlying_anonymous_enum'})
+
+    def assert_enum_references_compiletime(self, language, declarations):
+        for declaration in declarations:
             source = GLIB_HOST + r'''
 static const unsigned char gumjs_enum_bytecode[]={70,114,105,100,97};
 DECLARATION {
@@ -1542,8 +1827,8 @@ DECLARATION {
 const unsigned char *bytes(void){return gumjs_enum_bytecode;}
 '''
             source = source.replace('DECLARATION', declaration)
-            with self.subTest(declaration=declaration):
-                output, report = self.transform(source, 'cpp')
+            with self.subTest(language=language, declaration=declaration):
+                output, report = self.transform(source, language)
                 self.assertEqual(output, source.encode())
                 self.assertEqual(report['summary']['literal_occurrences_transformed'], 0)
                 self.assertEqual(report['summary']['resources_transformed'], 0)
@@ -1551,7 +1836,13 @@ const unsigned char *bytes(void){return gumjs_enum_bytecode;}
                 self.assertIn('enum_value_compile_time_context', reasons)
                 self.assertIn('resource_reference_enum_value_compile_time_context', reasons)
 
-    def test_cpp_anonymous_fixed_enum_malformed_or_unknown_base_fails_closed(self):
+    def test_cpp_enumerator_values_and_sizeof_resource_references_stay_compiletime(self):
+        self.assert_enum_references_compiletime('cpp', ('enum : unsigned long', 'enum Named : unsigned long', 'enum'))
+
+    def test_c_enumerator_values_and_sizeof_resource_references_stay_compiletime(self):
+        self.assert_enum_references_compiletime('c', ('enum : size_t', 'enum : unsigned long', 'enum Named', 'enum'))
+
+    def assert_anonymous_enum_fails_closed(self, language):
         broken = (
             'enum : size_t { X= };',
             'enum : size_t { X=1 }; void f( {',
@@ -1565,14 +1856,63 @@ const unsigned char *bytes(void){return gumjs_enum_bytecode;}
             'enum : decltype("frida") { X=1 };',
             'enum : __typeof__(gumjs_enum_bytecode) { X=1 };',
             'enum : unsigned + long { X=1 };',
+            'enum : unsigned unsigned { X=1 };',
+            'enum : signed __int128 { X=1 };',
+            'enum : unsigned __int128 { X=1 };',
+            'enum : long char { X=1 };',
             'enum : size_t { X=1 } bad( ;',
+            'void before( ; enum : size_t { X=1 };',
+            'enum : size_t { =1 };',
         )
         for source in broken:
-            with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
-                self.transform(source, 'cpp')
+            with self.subTest(language=language, source=source), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source, language)
             self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_does_not_parse')
-        with self.assertRaises(outline.OutlineError):
-            self.transform('enum : unsigned int { X=1 };', 'c')
+
+    def test_cpp_anonymous_fixed_enum_malformed_or_unknown_base_fails_closed(self):
+        self.assert_anonymous_enum_fails_closed('cpp')
+
+    def test_c_anonymous_fixed_enum_malformed_or_unknown_base_fails_closed(self):
+        self.assert_anonymous_enum_fails_closed('c')
+        for source in ('typedef unsigned long Alias; enum : Alias { X=1 };',
+                       'typedef float Alias; enum : Alias { X=1 };',
+                       'typedef unsigned int bool; enum : bool { X=1 };',
+                       'enum : _Bool int { X=1 };', 'enum : __int128 int { X=1 };',
+                       'enum : size_t { };', 'enum Named : unsigned int { X=1 };',
+                       'enum : size_t { X=1, Y= };',
+                       'enum : size_t { X=sizeof("FridaBrokenValue") + };'):
+            with self.subTest(source=source), self.assertRaises(outline.OutlineError) as caught:
+                self.transform(source, 'c')
+            self.assertEqual(caught.exception.report['failures'][-1]['reason'], 'input_does_not_parse')
+
+    def test_host_c_anonymous_fixed_enum_gnu99_width_signedness_and_runtime_bytes(self):
+        cc = os.environ.get('STRING_OUTLINE_CC') or shutil.which('clang')
+        if not cc:
+            self.skipTest('installed host Clang not selected for GNU99 fixed enum extension')
+        version = subprocess.run([cc, '--version'], capture_output=True, timeout=15)
+        if version.returncode or b'clang' not in version.stdout.lower():
+            self.skipTest('host compiler is not Clang; GNU99 fixed enum extension requires Clang')
+        host = GLIB_HOST.replace('typedef unsigned long gsize;', 'typedef __SIZE_TYPE__ gsize;')
+        source = host + r'''
+typedef __SIZE_TYPE__ size_t;
+enum : size_t { ILLEGAL=-1UL, INCOMPLETE=-2UL, EMPTY=-3UL };
+typedef enum : unsigned char { MAX_BYTE=255 } ByteEnum;
+_Static_assert(sizeof(__typeof__(ILLEGAL))==sizeof(size_t),"fixed size width");
+_Static_assert(ILLEGAL==(size_t)-1 && INCOMPLETE==(size_t)-2 && EMPTY==(size_t)-3,"fixed values");
+_Static_assert(sizeof(ByteEnum)==1 && MAX_BYTE==255,"fixed byte width");
+const char *name(void){return "FridaAnonymousCEnumRuntime";}
+int main(void){require(strcmp(name(),EXPECTED)==0 && name()==name());return 0;}
+'''
+        source = source.replace('EXPECTED', c_string('FridaAnonymousCEnumRuntime'))
+        with mock.patch.dict(os.environ, {'STRING_OUTLINE_CC': cc}):
+            self.compile_run(source, extra_flags=('-std=gnu99',), input_language='c')
+            output, report = self.transform(source, 'c')
+            self.assertEqual(report['skipped'], [])
+            self.assertEqual(report['parser_normalization']['kind_counts']['anonymous-enum-base'], 2)
+            self.assertEqual(report['summary']['heap_buffers'], 1)
+            self.assertIn(b'enum : size_t { ILLEGAL=-1UL', output)
+            self.assertIn(b'enum : unsigned char { MAX_BYTE=255 }', output)
+            self.compile_run(output, extra_flags=('-std=gnu99',), input_language='c')
 
     def test_host_cpp_anonymous_fixed_enum_width_signedness_and_runtime_bytes(self):
         size_type = 'unsigned int' if os.name == 'nt' else 'unsigned long'
@@ -2313,7 +2653,7 @@ class CppHeaderOriginBoundaryTests(unittest.TestCase):
             'static const char *name(void){return "FridaGeneratedOwned";}\n' +
             'int main(void){require(strcmp(name(),%s)==0);return 0;}\n' % c_string('FridaGeneratedOwned')) + header
         output, report = self.transform(source)
-        synthetic = b'#line 1 "<nianchu-outline-generated>"\n'
+        synthetic = b'# 1 "<nianchu-outline-generated>"\n'
         self.assertTrue(output.startswith(synthetic))
         self.assertEqual(output.count(synthetic), 2)
         self.assert_exact_header(header, source, output)
