@@ -1,6 +1,23 @@
 # 当前工程状态
 
-记录日期：2026-11-08。
+记录日期：2026-11-09。
+
+## 2026-11-09 AppInitializer 回归：继承的 ART 文件解析副本
+
+当前 Frida16 产品来自提交 `4516059cba184c4b5133d374f5abac7383cd95d4`，完整构建 run `42499266252` 的 checks、16、17 jobs 均成功；新16已完成文件核验和手机交付。用户自行启动后的生产 PID7316，start_ticks22213802，运行映像 SHA-256 `1c37df2853c03589c67ba83a5bc44f78dd49751be26ff9ff67a17e305955547c`。前节“完整产品待构建”是提交前的历史阶段记录。
+
+目标为 `com.danlan.xiaolan` 7.51.0/751002。用户报告 KPM 已卸载；裸 CLI 和零 create_script 的 production spawn/attach/resume 均复现九个 Provider 实例化失败及 `AppInitializer.doInitialize(SourceFile:13)` 的空 `List.isEmpty()`。普通 am 启动、production spawn/resume 不 attach、production spawn 加隔离 server numeric-PID attach 均在观察期存活。隔离 attach 的两版真实 Agent 段布局已核，不把测试结束主动 detach 的 `application-requested` 当作 Frida 被 App 杀死。旧版双 server spawn 对照发生32位zygote SIGILL并引起系统自行重建framework，未作为有效App版本对照；测试server及转发已清理。生产server映像始终保持。
+
+失败路径保留 zygote 继承的 Agent。Gum `ThreadCountCloaker` 的 ART import 枚举触发 `_gum_native_module_get_elf_module()` 缓存；`gum_elf_module_load()` 用 `g_mapped_file_new()` 读取整份 ART，GBytes 长期持有该文件映射。内部 Cloak 不改变原生 `/proc/self/maps`。失败快照中多出 `0x7951539000–0x7951c90000`、offset0、大小 `0x757000` 的同路径 `libart.so` 副本，启动后副本成为 RWX，实际 ART 代码仍 execute-only；新加载 Agent 的通过快照没有副本，实际 ART 代码成为 RWX。此路径上游16/17原本就存在，尚不将其归因为新字符串arena的某个错误。
+
+一次性测试App中，probe只把该只读副本原地址替换为匿名映射，逐字节确认7696384字节一致，恢复只读，随后卸载probe脚本再resume。PID25255和重复实验PID26904均存活27秒，无Provider/NPE；匹配的同脚本只读control保留文件映射，PID26723再次出现相同Provider/NPE。证据为 `work/nianchu-art-backing-probe-20261109-a/`、`work/nianchu-art-backing-probe-control-20261109-a/` 和 `work/nianchu-art-backing-probe-20261109-b/`。该对照确认带路径的解析副本是本次兼容性触发点；壳内部具体maps消费者函数尚未定位，不冒用旧750043偏移。
+
+源码修复已纳入两版默认兼容 recipe：Android ELF磁盘解析改用 `g_file_get_contents()` 和 `g_bytes_new_take()` 持有完整匿名内存副本，覆盖ONLINE/OFFLINE，保留source_blob、vDSO、APK提取、原解析指针生命周期和非Android映射路径；文件读取失败保留OFFLINE错误/ONLINE live-base回退。避免对heap buffer登记page-aligned `file_mapped_range`。此分配发生于已初始化GLib后的lazy解析，不恢复早期constructor101调用GLib。
+
+最终本地完整回归 **371项，367通过、0失败、0错误、4环境跳过**，用时209.466秒，全部受检scripts/tests身份前后保持；报告 `work/nianchu-elf-backing-full-regression-20261109-c/report.json`。跳过为两项Windows符号链接权限、host GCC不支持GNU99定基enum及缺valac。新增ELF专项5项包含两版×两平台四个实际编译执行的源码提取harness，验证普通/空文件、错误、cache/lifetime及blob/vDSO/APK旁路；GLib ownership doubles不代替Android成品。首轮完整b只有旧guard数量断言51/56未更新，现随新增gumelfmodule改为52/57；前期子Python GBK错误输出已通过显式UTF-8修正。旧日志保留，未放宽产品检查。
+
+新server/Gadget完整构建与无probe成品真机验收继续执行；probe成功不当作新server成品已验收。当前HEAD仍为 `4516059`，新源码尚未提交或推送。
+
 
 ## 2026-11-08 新 server16 启动 SIGSEGV：GLib 初始化前字符串恢复
 

@@ -2,6 +2,13 @@
 
 仅以 `E:/frida魔改/fridaneed/最新的frida内容/anti-frida.py` 作为该脚本的采用参考；旧副本不重复登记。用户提供的实践脚本、三套 patch 和文章均按固定源码的适用性、冲突及创建/消费者联动判断，不因使用 LIEF、字符串替换或功能裁剪的形式而整体排除。这里区分“参考已验证”“本项目源码已迁移”“本项目编译/运行已验证”。
 
+## 2026-11-09 Android ELF 解析副本与 maps 自定位兼容
+
+- `gum/gumelfmodule.c` 的磁盘解析原来使用 `GMappedFile`，ONLINE 模式也产生完整同路径文件映射。ART import枚举缓存使这份副本随zygote fork继承并驻留。原生maps读取仍能看见副本，内部Cloak不改变该事实。
+- 当前751002 App的失败maps显示副本被改成RWX而实际ART代码未改；仅把副本改成原地址、同字节的匿名只读映射后App存活27秒，匹配只读control仍出现Provider/AppInitializer NPE。当前补丁在Android使用`g_file_get_contents`加`g_bytes_new_take`，保留完整解析字节和GBytes生命周期，覆盖ONLINE/OFFLINE避免fallback再次产生同名磁盘映射。
+- source_blob、vDSO、APK提取和非Android原映射路径保留。OFFLINE读取失败仍报错；ONLINE仍回退live-base并清理被容忍的local_error。heap副本不登记整页file_mapped_range，避免错误移除邻近heap cloak。ART约7.34MiB的完整解析副本由私有heap持有，增加实际私有内存成本。
+- 此读取发生在lazy ELF解析、GLib已初始化之后，不改变constructor101的独立mmap/atomic字符串恢复。该上游缓存机制并非本次新增arena本身的缺陷；当前对照定位触发点，未声称已经取得壳内具体消费者函数或新成品验收。
+
 ## 2026-11-07 E 轮完整可读段编码改造
 
 - Android 编译目标的字符串恢复使用每 TU 一个匿名 RW 映射和内部 32 位原子 once，直接 mmap/mmap2 系统调用，不依赖 GLib、malloc、pthread 或 errno；ARM64 比较交换内联 LDAXR/STXR，避免编译器 outline-atomics 的外部调用。该修复对应新 server16 的两份启动 tombstone：`g_ptr_set_add(NULL, key)` 在 GLib 初始化前访问 NULL+8。host 诊断继续使用 GLib 模型，wrapper 按实际 target/驱动 triple 显式选 Android 实现，未知 Android 架构拒绝。原语义字节、静态字段与一次性地址稳定性保持，映射驻留到进程退出；每个 TU 共用一个 arena，避免逐字符串新增 VMA。四组 ARM64/ARM32 C/C++ 独立链接及 Unicorn 原值执行通过；独立源码审查未发现显式Android target路径的syscall ABI、原子发布与字节offset阻断。驱动名回退只检查argv[0]：使用ccache等launcher时必须传显式Android target；当前固定releng已有显式target。真实多核、signal重入、fork时序和完整产品仍须真机验收。

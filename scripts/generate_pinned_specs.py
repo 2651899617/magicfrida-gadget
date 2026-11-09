@@ -24,8 +24,14 @@ EXTRA_FILES = {
 }
 
 EXTRA_GUM_FILES = {
-    '16.7.19': {'gum/gum.c': '7cb75dacbe8fe3402a1675ac1828a472c84b4fc19f9ab83e0fec4a8ad674434c'},
-    '17.25.2': {'gum/gum.c': '62d0a353bafb5edc87adf18460dcc7a0dcf0e1280c81f3c84cbb6e6988e3be4e'},
+    '16.7.19': {
+        'gum/gum.c': '7cb75dacbe8fe3402a1675ac1828a472c84b4fc19f9ab83e0fec4a8ad674434c',
+        'gum/gumelfmodule.c': '12b93b344b68b9f641f69252c1415d15543a9bdcdc557d094912dcb269b3983a',
+    },
+    '17.25.2': {
+        'gum/gum.c': '62d0a353bafb5edc87adf18460dcc7a0dcf0e1280c81f3c84cbb6e6988e3be4e',
+        'gum/gumelfmodule.c': '5d49e38fa7831c62b6a7863f8aed429ec4483793da8f8f3ad374606bd4294a7c',
+    },
 }
 
 STRING_OUTLINE_RELENG_FILES = {
@@ -266,6 +272,73 @@ frida_on_load (void)
             elif relative.endswith('lib/payload/portal-client.vala'):
                 changes = [edit('"Emulated realm is not supported by frida-gadget"',
                                 '"Emulated realm is not supported by nianchu-gadget"')]
+            elif relative == 'subprojects/frida-gum/gum/gumelfmodule.c':
+                old = '''      GMappedFile * file;
+      gconstpointer data;
+      gsize size;
+      GumMemoryRange r;
+
+      file = g_mapped_file_new (self->source_path, FALSE, &local_error);
+      if (file != NULL)
+      {
+        self->file_bytes = g_mapped_file_get_bytes (file);
+        g_mapped_file_unref (file);
+
+        data = g_bytes_get_data (self->file_bytes, &size);
+        r.base_address = GUM_ADDRESS (data);
+        r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());
+        gum_cloak_add_range (&r);
+        self->file_mapped_range = r;
+      }
+      else
+      {
+        if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
+          goto unable_to_open;
+
+        self->file_bytes = g_bytes_new_static (
+            GSIZE_TO_POINTER (self->base_address),
+            G_MAXSIZE - self->base_address);
+      }
+'''
+                new = '''#ifdef HAVE_ANDROID
+      gchar * contents = NULL;
+      gsize size;
+
+      /* Keep parser backing anonymous, without a second named module mapping.
+       * GBytes owns the complete file copy until gum_elf_module_unload(). */
+      if (g_file_get_contents (self->source_path, &contents, &size, &local_error))
+        self->file_bytes = g_bytes_new_take (contents, size);
+#else
+      GMappedFile * file;
+      gconstpointer data;
+      gsize size;
+      GumMemoryRange r;
+
+      file = g_mapped_file_new (self->source_path, FALSE, &local_error);
+      if (file != NULL)
+      {
+        self->file_bytes = g_mapped_file_get_bytes (file);
+        g_mapped_file_unref (file);
+
+        data = g_bytes_get_data (self->file_bytes, &size);
+        r.base_address = GUM_ADDRESS (data);
+        r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());
+        gum_cloak_add_range (&r);
+        self->file_mapped_range = r;
+      }
+#endif
+      if (self->file_bytes == NULL)
+      {
+        if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
+          goto unable_to_open;
+
+        g_clear_error (&local_error);
+        self->file_bytes = g_bytes_new_static (
+            GSIZE_TO_POINTER (self->base_address),
+            G_MAXSIZE - self->base_address);
+      }
+'''
+                changes = [edit(old, new)]
             elif relative.endswith('gumscriptscheduler.c'):
                 changes = [edit('g_thread_new ("gum-js-loop",', 'g_thread_new ("nianchu-js",')]
             elif relative.endswith('bindings/gumjs/generate-runtime.py') and version.startswith('16.'):

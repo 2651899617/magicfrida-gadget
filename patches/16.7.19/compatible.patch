@@ -463,3 +463,36 @@
  
          raw_val = strv_to_meson(argv)
          if identifier in {"c", "cpp"}:
+--- a/subprojects/frida-gum/gum/gumelfmodule.c
++++ b/subprojects/frida-gum/gum/gumelfmodule.c
+@@ -545,6 +545,15 @@
+ #endif
+     if (!gum_maybe_extract_from_apk (self->source_path, &self->file_bytes))
+     {
++#ifdef HAVE_ANDROID
++      gchar * contents = NULL;
++      gsize size;
++
++      /* Keep parser backing anonymous, without a second named module mapping.
++       * GBytes owns the complete file copy until gum_elf_module_unload(). */
++      if (g_file_get_contents (self->source_path, &contents, &size, &local_error))
++        self->file_bytes = g_bytes_new_take (contents, size);
++#else
+       GMappedFile * file;
+       gconstpointer data;
+       gsize size;
+@@ -562,11 +571,13 @@
+         gum_cloak_add_range (&r);
+         self->file_mapped_range = r;
+       }
+-      else
++#endif
++      if (self->file_bytes == NULL)
+       {
+         if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
+           goto unable_to_open;
+ 
++        g_clear_error (&local_error);
+         self->file_bytes = g_bytes_new_static (
+             GSIZE_TO_POINTER (self->base_address),
+             G_MAXSIZE - self->base_address);

@@ -927,6 +927,18 @@
         }
       ],
       "optional": {}
+    },
+    {
+      "path": "subprojects/frida-gum/gum/gumelfmodule.c",
+      "upstream_sha256": "5d49e38fa7831c62b6a7863f8aed429ec4483793da8f8f3ad374606bd4294a7c",
+      "edits": [
+        {
+          "old": "      GMappedFile * file;\n      gconstpointer data;\n      gsize size;\n      GumMemoryRange r;\n\n      file = g_mapped_file_new (self->source_path, FALSE, &local_error);\n      if (file != NULL)\n      {\n        self->file_bytes = g_mapped_file_get_bytes (file);\n        g_mapped_file_unref (file);\n\n        data = g_bytes_get_data (self->file_bytes, &size);\n        r.base_address = GUM_ADDRESS (data);\n        r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());\n        gum_cloak_add_range (&r);\n        self->file_mapped_range = r;\n      }\n      else\n      {\n        if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)\n          goto unable_to_open;\n\n        self->file_bytes = g_bytes_new_static (\n            GSIZE_TO_POINTER (self->base_address),\n            G_MAXSIZE - self->base_address);\n      }\n",
+          "new": "#ifdef HAVE_ANDROID\n      gchar * contents = NULL;\n      gsize size;\n\n      /* Keep parser backing anonymous, without a second named module mapping.\n       * GBytes owns the complete file copy until gum_elf_module_unload(). */\n      if (g_file_get_contents (self->source_path, &contents, &size, &local_error))\n        self->file_bytes = g_bytes_new_take (contents, size);\n#else\n      GMappedFile * file;\n      gconstpointer data;\n      gsize size;\n      GumMemoryRange r;\n\n      file = g_mapped_file_new (self->source_path, FALSE, &local_error);\n      if (file != NULL)\n      {\n        self->file_bytes = g_mapped_file_get_bytes (file);\n        g_mapped_file_unref (file);\n\n        data = g_bytes_get_data (self->file_bytes, &size);\n        r.base_address = GUM_ADDRESS (data);\n        r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());\n        gum_cloak_add_range (&r);\n        self->file_mapped_range = r;\n      }\n#endif\n      if (self->file_bytes == NULL)\n      {\n        if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)\n          goto unable_to_open;\n\n        g_clear_error (&local_error);\n        self->file_bytes = g_bytes_new_static (\n            GSIZE_TO_POINTER (self->base_address),\n            G_MAXSIZE - self->base_address);\n      }\n",
+          "count": 1
+        }
+      ],
+      "optional": {}
     }
   ]
 }

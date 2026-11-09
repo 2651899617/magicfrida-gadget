@@ -30,7 +30,7 @@ Android arm64 自有源码构建工程，面向自有或已明确授权的测试
 
 默认 recipe 按参考 patch 开启 `exit-monitor-off`、`signal-interposition-off`、`agent-entrypoint-rename` 和 `gadget-json-config`。server 默认资源目录与 agent 前缀使用 UUID；helper、socket、memfd 和初始化品牌使用 `nianchu`。RPC 标记通过双层 Base64 解码生成，线上协议值仍为 `frida:rpc`；Droidy/ADB 对参考 patch 指定的 OPEN/CLSE/WRTE 分支执行 break。Linux 临时目录返回值按参考改为 `/system/lib64`，其设备权限与运行影响尚待实机验证。系统 Python 和现有 frida.exe 保持原状。
 
-两版 pinned guard 为 **51／56** 份文件，包含 Android 编译入口 `releng/env_android.py`。基线提交 `a8c907f212ffa588223de8bb8598302e4612e394` 的 run 42353264303 已完成 raw Agent 名称修复、完整构建和四简名手机交付；E 轮编码改造的新构建和验证记录另见 `docs/STATUS.md`。
+两版 pinned guard 为 **52／57** 份文件，包含 Android 编译入口 `releng/env_android.py` 和 `gum/gumelfmodule.c`。Android ELF磁盘解析使用GBytes持有完整heap副本，避免额外同路径文件映射干扰宿主按maps定位实际ART映像；source_blob、vDSO、APK提取与非Android原映射路径保留。基线提交 `a8c907f212ffa588223de8bb8598302e4612e394` 的 run 42353264303 已完成 raw Agent 名称修复、完整构建和四简名手机交付；后续编码、启动修复及AppInitializer回归的构建与验证记录见 `docs/STATUS.md`。
 
 | feature | 当前默认与作用 |
 |---|---|
