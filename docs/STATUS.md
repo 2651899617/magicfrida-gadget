@@ -1,6 +1,14 @@
 # 当前工程状态
 
-记录日期：2026-11-09。
+记录日期：2026-11-10。
+
+## 2026-11-10 GitHub Actions 构建及 ELF backing 消费链审计
+
+AppInitializer 修复已提交为 `2da202eed0c2bcbf44a87e0d36e6c17f09104295`，已推送 `fix/build-integrity`，触发 run [42660605039](https://github.com/2651899617/magicfrida-gadget/actions/runs/42660605039)。该 run 的云端回归为371项、364通过、7跳过、0失败；两版完整构建已进入编译。所有本地大型编译已停止，后续完整构建只在 GitHub Actions 执行。
+
+新增独立构建主机审计 `scripts/audit_elf_backing_ci.py`：在 compatible 收集后、Zygisk 源码变化前保存第一份证据；Zygisk 收集后保存第二份。核对实际 canonical Gum SHA、ARM64/ARM32 编译回执与 ET_REL 对象、对象在 Gum ar 归档中的逐字节存在、实际 Ninja 数据依赖及执行记录、Agent 完整 ELF 和两架构嵌入 server 的字节一致性，并保存证据 tar 与逐文件 SHA。产物与失败日志均上传该证据。该步骤不编译代码、不操作设备，构建来源证据不代替 Android runtime 验收；编译器在主机上计算 SHA，完整编译器及临时预处理/转换文件不随证据打包。
+
+消费链审计补充需要后继 CI 实际执行；上面的首轮 run 不含新增审计步骤。完整产品、独立下载审计和隔离原生验证仍待完成。保持正在运行的生产 server，不自动切换进程映像。
 
 ## 2026-11-09 AppInitializer 回归：继承的 ART 文件解析副本
 

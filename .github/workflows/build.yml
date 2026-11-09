@@ -164,6 +164,13 @@ jobs:
           python3 -I scripts/collect_artifacts.py --rewrite-elf --build frida-src/build --version "$FRIDA_VERSION" \
             --out out/compatible --source-report reports/source.json \
             --patch-report reports/compatible-post-build.json 2>&1 | tee logs/compatible-collect.log
+      - name: Audit compatible ELF backing consumption
+        run: |
+          set -euo pipefail
+          python3 -I scripts/audit_elf_backing_ci.py --source frida-src --build frida-src/build \
+            --version "$FRIDA_VERSION" --profile compatible --config outline-state/config.json \
+            --manifest out/compatible/manifest.json --out out/provenance/compatible \
+            2>&1 | tee logs/compatible-elf-backing-audit.log
       - name: Add explicit Zygisk initialization source feature
         run: |
           set -euo pipefail
@@ -184,6 +191,13 @@ jobs:
           python3 -I scripts/collect_artifacts.py --rewrite-elf --build frida-src/build --version "$FRIDA_VERSION" \
             --out out/zygisk --source-report reports/source.json \
             --patch-report reports/zygisk-post-build.json 2>&1 | tee logs/zygisk-collect.log
+      - name: Audit Zygisk ELF backing consumption
+        run: |
+          set -euo pipefail
+          python3 -I scripts/audit_elf_backing_ci.py --source frida-src --build frida-src/build \
+            --version "$FRIDA_VERSION" --profile zygisk --config outline-state/config.json \
+            --manifest out/zygisk/manifest.json --out out/provenance/zygisk \
+            2>&1 | tee logs/zygisk-elf-backing-audit.log
       - name: Build wrapper and package verified final Gadget
         run: |
           set -euo pipefail
@@ -198,6 +212,7 @@ jobs:
             out/zygisk/
             out/module/nianchu-zygisk-*.zip
             out/module/build-report.json
+            out/provenance/
             NOTICE/
           if-no-files-found: error
       - name: Keep provenance and failure logs
@@ -208,6 +223,7 @@ jobs:
           path: |
             logs/
             reports/
+            out/provenance/
             outline-state/reports/
             frida-src/build/meson-logs/
             frida-src/build/meson-info/intro-targets.json
