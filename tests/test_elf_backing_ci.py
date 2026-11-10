@@ -101,16 +101,26 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'lacks rewritten Agent'):
             audit.bind_embedded_agent(linked, embedded, rewritten, rewrite, b'unrelated-server')
 
-    def test_thumb_relocator_requires_exact_arm32_same_agent_chain(self):
+    def test_thumb_relocator_requires_both_architectures_same_agent_chains(self):
+        # Gum compiles its ARM/Thumb backend into both the ARM64 primary build
+        # and the ARM32 compatibility build, as observed in run 42764739790.
         records = [{'policy': 'android-arm64', 'agent_sha256': 'a' * 64},
                    {'policy': 'android-arm', 'agent_sha256': 'b' * 64}]
-        thumb = {'policy': 'android-arm', 'agent_sha256': 'b' * 64}
-        audit.bind_thumb_compilation(records, [thumb])
-        for invalid in ([], [thumb, thumb], [{**thumb, 'policy': 'android-arm64'}]):
-            with self.assertRaisesRegex(ValueError, 'exactly one actual ARM32'):
+        thumbs = [dict(row) for row in records]
+        audit.bind_thumb_compilation(records, thumbs)
+        audit.bind_thumb_compilation(records, list(reversed(thumbs)))
+        for invalid in ([], [thumbs[1]], [thumbs[0]], [thumbs[1], thumbs[1]],
+                        thumbs + [thumbs[1]], [{**thumbs[0], 'policy': 'host'}, thumbs[1]]):
+            with self.assertRaisesRegex(ValueError, 'exactly one actual ARM64 and ARM32 Thumb'):
                 audit.bind_thumb_compilation(records, invalid)
-        with self.assertRaisesRegex(ValueError, 'same ARM32 Agent'):
-            audit.bind_thumb_compilation(records, [{**thumb, 'agent_sha256': 'c' * 64}])
+        for index in (0, 1):
+            mismatched = [dict(row) for row in thumbs]
+            mismatched[index]['agent_sha256'] = 'c' * 64
+            with self.assertRaisesRegex(ValueError, 'same Agent for ' + thumbs[index]['policy']):
+                audit.bind_thumb_compilation(records, mismatched)
+        with self.assertRaisesRegex(ValueError, 'ELF backing compilation required'):
+            audit.bind_thumb_compilation(records[:1], thumbs)
+
     def test_workflow_audits_each_profile_before_next_mutation_or_upload(self):
         text = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')
         compatible = text.index('- name: Audit compatible ELF backing consumption')

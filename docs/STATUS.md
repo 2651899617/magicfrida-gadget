@@ -2,6 +2,14 @@
 
 记录日期：2026-11-10。
 
+## 2026-11-10 Thumb 双架构消费链审计修正，仅重建16
+
+提交 `6a0a191744fb232e9ef1e42434f21f79cbcedc75` 的 run [42764739790](https://github.com/2651899617/magicfrida-gadget/actions/runs/42764739790) checks成功；16完整make和compatible成品收集完成，随后审计错误 `exactly one actual ARM32 Thumb relocator compilation required`，未发布产品。失败日志artifact13754225614，1,796,768字节，SHA-256 `1906bac8f37f2785cd072dec7eb71187552dae564ab992dbd22dd4192afc737e`，已独立下载核验。
+
+真实receipt证明同一修正 `gumthumbrelocator.c` SHA `079e6a38e41e2b3cb6ad1f6ba0941ef4b28c905449431bc95f3e21d438737bb6` 被编译两次：primary ARM64和compat ARM32都成功。Gum ARM/Thumb后端也进入ARM64库，原新增gate错误假定只有ARM32记录。本次不删除另一架构证据，改为恰好各一份，分别绑定对应架构ELF backing对象链接的Agent，拒绝缺失、重复、未知架构或任一Agent SHA不匹配。
+
+按用户“只核对 16 版本 17 目前还没有测试”，push默认仅构建16；manual dispatch显式选择17或both才扩大矩阵。完整编译继续只用GitHub。旧27e62e0的16 compatible/Zygisk完整证据已分别独立复核43个输入，报告 `work/nianchu-cloud-evidence16-independent-20261110-c/report.json`；不作为Thumb新产品或Android验收。生产7316保持原映像，新产品尚未部署。
+
 ## 2026-11-10 新成品 spawn 实测与 ARM32 清理 SIGILL 修复
 
 完整 GitHub run [42663039421](https://github.com/2651899617/magicfrida-gadget/actions/runs/42663039421) 对提交 `27e62e0244d91c50f5be9446f786c4cb7d0d2826` 的 checks、16.7.19、17.25.2 全部成功；回归379项、372通过、7跳过、0失败。两版成品归档已顺序流式下载并核对发布SHA/大小/ZIP CRC。新16的compatible、Zygisk、两架构内嵌Agent、Gadget和模块独立核验通过，报告 `work/nianchu-cloud-product-audit-42663039421-20261110-a/verified16.json`。17独立成品审计和两版完整证据tar的本机独立消费链复核仍待完成。

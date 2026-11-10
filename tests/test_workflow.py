@@ -150,9 +150,15 @@ class WorkflowTests(unittest.TestCase):
             document = yaml.load(source, Loader=yaml.BaseLoader)
             self.assertIn('on', document)
             self.assertEqual(document['jobs']['build']['needs'], 'checks')
-            rows = document['jobs']['build']['strategy']['matrix']['include']
-            self.assertEqual([(r['version'], r['ndk_revision']) for r in rows],
-                             [('16.7.19', '25.2.9519653'), ('17.25.2', '29.0.14206865')])
+            expression = document['jobs']['build']['strategy']['matrix']['include']
+            self.assertIn('fromJSON(', expression)
+            rows = [json.loads(value) for value in re.findall(r"'(\[\{[^']+\}\])'", expression)]
+            expected16 = [{'version': '16.7.19', 'ndk_revision': '25.2.9519653'}]
+            expected17 = [{'version': '17.25.2', 'ndk_revision': '29.0.14206865'}]
+            self.assertEqual(rows, [expected17, expected16 + expected17, expected16])
+            options = document['on']['workflow_dispatch']['inputs']['frida_version']
+            self.assertEqual(options['default'], '16.7.19')
+            self.assertEqual(options['options'], ['16.7.19', '17.25.2', 'both'])
         for token in ('scripts/verify_source.py', 'scripts/apply_patches.py', 'scripts/collect_artifacts.py',
                       'scripts/build_module.py', '-Dserver=enabled', '-Dgadget=enabled',
                       '-Dfrida-core:compiler_backend=enabled', "go-version: '1.26.x'", 'if: always()',
@@ -160,6 +166,17 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(token, source)
         for token in ('set +e', '--fuzz=5', 'patches/frida-core', 'head -1', 'sh.rustup.rs', '17.6.2'):
             self.assertNotIn(token, source)
+
+    def test_push_builds_only_16_and_dispatch_requires_explicit_17_selection(self):
+        text = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')
+        expression = next(line for line in text.splitlines() if 'include: ${{ fromJSON(' in line)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.frida_version == '17.25.2'", expression)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.frida_version == 'both'", expression)
+        rows = [json.loads(value) for value in re.findall(r"'(\[\{[^']+\}\])'", expression)]
+        expected16 = [{'version': '16.7.19', 'ndk_revision': '25.2.9519653'}]
+        expected17 = [{'version': '17.25.2', 'ndk_revision': '29.0.14206865'}]
+        self.assertEqual(rows, [expected17, expected16 + expected17, expected16])
+        self.assertIn("default: '16.7.19'", text)
 
     def test_workflow_pins_lief_in_an_independent_venv_before_build(self):
         text = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')

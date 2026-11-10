@@ -215,11 +215,16 @@ def bind_embedded_agent(linked, embedded, rewritten, rewrite, canonical):
 
 
 def bind_thumb_compilation(records, thumb_records):
-    require(len(thumb_records) == 1 and thumb_records[0]['policy'] == 'android-arm',
-            'exactly one actual ARM32 Thumb relocator compilation required')
-    arm_backing = next(row for row in records if row['policy'] == 'android-arm')
-    require(thumb_records[0]['agent_sha256'] == arm_backing['agent_sha256'],
-            'Thumb relocation repair and ELF backing repair must be linked into the same ARM32 Agent')
+    policies = {'android-arm64', 'android-arm'}
+    require(len(thumb_records) == 2 and {row['policy'] for row in thumb_records} == policies,
+            'exactly one actual ARM64 and ARM32 Thumb relocator compilation required')
+    require(len(records) == 2 and {row['policy'] for row in records} == policies,
+            'exactly one actual ARM64 and ARM32 ELF backing compilation required')
+    backing_by_policy = {row['policy']: row for row in records}
+    for thumb in thumb_records:
+        backing = backing_by_policy[thumb['policy']]
+        require(thumb['agent_sha256'] == backing['agent_sha256'],
+                'Thumb relocation repair and ELF backing repair must be linked into the same Agent for ' + thumb['policy'])
 
 
 def audit(source, build, version, profile, config_path, manifest_path, output):

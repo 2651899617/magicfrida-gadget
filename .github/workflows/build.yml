@@ -4,6 +4,12 @@ on:
   push:
     branches: [main, fix/build-integrity]
   workflow_dispatch:
+    inputs:
+      frida_version:
+        description: 'Version to build'
+        type: choice
+        default: '16.7.19'
+        options: ['16.7.19', '17.25.2', 'both']
 
 permissions:
   contents: read
@@ -49,11 +55,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - version: '16.7.19'
-            ndk_revision: '25.2.9519653'
-          - version: '17.25.2'
-            ndk_revision: '29.0.14206865'
+        # Push builds 16 only; manual dispatch may explicitly select 17 or both.
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.frida_version == '17.25.2' && '[{"version":"17.25.2","ndk_revision":"29.0.14206865"}]' || github.event_name == 'workflow_dispatch' && inputs.frida_version == 'both' && '[{"version":"16.7.19","ndk_revision":"25.2.9519653"},{"version":"17.25.2","ndk_revision":"29.0.14206865"}]' || '[{"version":"16.7.19","ndk_revision":"25.2.9519653"}]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     env:
