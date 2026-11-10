@@ -2,6 +2,20 @@
 
 记录日期：2026-11-10。
 
+## 2026-11-10 新成品 spawn 实测与 ARM32 清理 SIGILL 修复
+
+完整 GitHub run [42663039421](https://github.com/2651899617/magicfrida-gadget/actions/runs/42663039421) 对提交 `27e62e0244d91c50f5be9446f786c4cb7d0d2826` 的 checks、16.7.19、17.25.2 全部成功；回归379项、372通过、7跳过、0失败。两版成品归档已顺序流式下载并核对发布SHA/大小/ZIP CRC。新16的compatible、Zygisk、两架构内嵌Agent、Gadget和模块独立核验通过，报告 `work/nianchu-cloud-product-audit-42663039421-20261110-a/verified16.json`。17独立成品审计和两版完整证据tar的本机独立消费链复核仍待完成。
+
+新server16已推送 `/data/local/tmp/nianchu-spawn-42663039421-20261110-b/server16`，54,198,952字节，SHA-256 `42fbb0fcff6f64326f50055bf43b43e16207201c6c960b5497743b6f6e69e95a`，未替换生产 `/data/local/tmp/server16`。候选PID10993在loopback47016握手full后，对 `com.danlan.xiaolan` 7.51.0/751002执行一次零JS spawn；25秒取消，未返回PID、未attach/resume。系统报 `ProcessStartResult.pid` 的null读取，App未创建；原AppInitializer/List.isEmpty为0条不能判定修复通过。报告 `work/nianchu-newserver16-app-spawn-42663039421-20261110-b/report.json`。
+
+pending spawn/child均为空后只对已记录候选10993发TERM。退出期间13:16:33的32位zygote11560发生SIGILL，随后framework自行重建；boot_id不变。生产7316的完整PID/start_ticks22213802/exe/device66323/inode24721/argv/大小及运行SHA `1c37df2853c03589c67ba83a5bc44f78dd49751be26ff9ff67a17e305955547c`始终保持，没有向生产、zygote或system_server发信号。候选/helper11226/监听已退出，精确forward37949→47016已移除；新文件和全部证据保留。普通am启动的等待命令25秒超时，但只读后续观察确认17865/17895保持20秒、framework11639/11548/11551稳定，Activity为SignInActivity登录页，近期日志无原NPE；不是新server spawn或业务页验收。
+
+完整tombstone和四组runtime代码窗口绑定新ARM32 Agent：RX文件offset0x4dd000对应ELF VA0x4de000，load bias0xc7e43000；LR0xc8334b01对应ELF VA0x4f1b00，逐字节匹配 `gum_memory_get_protection → gum_proc_maps_iter_destroy → close`。故障PC0xe098571c字节 `2d e9 01 80`为Thumb非法PUSH含PC；来自两版 pinned `gum/arch-arm/gumthumbrelocator.c` 的PC-relative LDR重定位。修复保存 `{r0,r1}`预留两栈槽，第二槽覆盖目标后仍POP `{r0,pc}`，r1保持不变。两版原fixture SHA相同 `52db2f355ddf39e347c79b8b5322cc64e9bc6a94d2564be102b3fefa8ea6da09`，只改该序列。小型实际提取C函数原生回归两项通过，旧编码失败/修复后成功；writer和目标内存为fixture模型，尚未做真实ARM32跳板执行或修复后设备验收。云端消费链gate新增Thumb源码→ARM32对象→archive→同一Agent绑定。此次修复尚未重建成品；前述27e62e0产品不含此修正。
+
+定向回归 `work/nianchu-thumb-focused-regression-20261110-a/report.json`：60项、59通过、0失败/错误、1项缺host C编译器跳过（既有ELF backing host harness）；新增Thumb两项包含四次小型host原生fixture执行，全部通过。生成器重放、GNU patch/feature组合、消费链绑定拒绝和workflow契约均通过；完整Android构建继续由GitHub执行。
+
+证据：`work/nianchu-newserver16-framework-evidence-20261110-a/`，地址绑定 `crash-binding.json`；普通启动只读观察 `work/nianchu-newserver16-ordinary-readonly-20261110-a/`。先前双Agent环境下的spawn结果不作clean comparison，App创建前ProcessStartResult-null阶段仍需独立定位；不重复注入、不控制KPM、不改SELinux、不自动停止/切换生产server。
+
 ## 2026-11-10 GitHub Actions 构建及 ELF backing 消费链审计
 
 AppInitializer 修复已提交为 `2da202eed0c2bcbf44a87e0d36e6c17f09104295`，已推送 `fix/build-integrity`，触发 run [42660605039](https://github.com/2651899617/magicfrida-gadget/actions/runs/42660605039)。该 run 的云端回归为371项、364通过、7跳过、0失败；两版完整构建已进入编译。所有本地大型编译已停止，后续完整构建只在 GitHub Actions 执行。

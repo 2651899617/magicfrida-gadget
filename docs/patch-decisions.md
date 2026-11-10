@@ -2,6 +2,12 @@
 
 仅以 `E:/frida魔改/fridaneed/最新的frida内容/anti-frida.py` 作为该脚本的采用参考；旧副本不重复登记。用户提供的实践脚本、三套 patch 和文章均按固定源码的适用性、冲突及创建/消费者联动判断，不因使用 LIEF、字符串替换或功能裁剪的形式而整体排除。这里区分“参考已验证”“本项目源码已迁移”“本项目编译/运行已验证”。
 
+## 2026-11-10 ARM32 Thumb PC-relative LDR 跳板修复
+
+- 当前16新成品候选清理期间的zygote SIGILL具有独立tombstone证据：PC处 `2d e9 01 80`，Thumb PUSH包含禁止的PC寄存器。runtime返回地址经PT_LOAD的0x1000差值修正后，四组代码字节与新ARM32 Agent精确匹配，调用链为maps迭代器销毁时调用close；不是原ART parser backing触发的AppInitializer NPE。
+- 两版Gum固定源码同一 `gum_thumb_relocator_rewrite_ldr` 使用 `push {r0,pc}`给后续跳转预留栈槽。修正为 `push {r0,r1}`；r1只被压栈不修改，其槽被实际目标地址覆盖，最后 `pop {r0,pc}`恢复r0并跳转。原栈深度/目标Thumb位、非PC LDR和其它指令重定位保留。
+- 两版fixture来自各自精确Git commit，SHA均 `52db2f355ddf39e347c79b8b5322cc64e9bc6a94d2564be102b3fefa8ea6da09`；generator/spec/compatible.patch联动。回归提取实际函数，在小型host C fixture验证旧字节拒绝、修复序列、寄存器/目标/栈槽、非PC和非literal旁路；云端审计要求实际Thumb对象与ELF backing对象链接到同一ARM32 Agent。host writer模型不称实际ARM32执行，完整云端成品和真机验收仍以独立报告为准。
+
 ## 2026-11-09 Android ELF 解析副本与 maps 自定位兼容
 
 - `gum/gumelfmodule.c` 的磁盘解析原来使用 `GMappedFile`，ONLINE 模式也产生完整同路径文件映射。ART import枚举缓存使这份副本随zygote fork继承并驻留。原生maps读取仍能看见副本，内部Cloak不改变该事实。

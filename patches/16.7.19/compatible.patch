@@ -496,3 +496,20 @@
          self->file_bytes = g_bytes_new_static (
              GSIZE_TO_POINTER (self->base_address),
              G_MAXSIZE - self->base_address);
+--- a/subprojects/frida-gum/gum/arch-arm/gumthumbrelocator.c
++++ b/subprojects/frida-gum/gum/arch-arm/gumthumbrelocator.c
+@@ -698,11 +698,9 @@
+   {
+     target = ARM_REG_R0;
+ 
+-    /*
+-     * Push the current PC onto the stack to make space. This will be
+-     * overwritten with the correct address before it is popped.
+-     */
+-    gum_thumb_writer_put_push_regs (ctx->output, 2, target, ARM_REG_PC);
++    /* Thumb PUSH cannot include PC. Save a second low register to reserve
++     * the target slot; it is overwritten before POP restores r0 and PC. */
++    gum_thumb_writer_put_push_regs (ctx->output, 2, target, ARM_REG_R1);
+   }
+   else
+   {

@@ -101,6 +101,16 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'lacks rewritten Agent'):
             audit.bind_embedded_agent(linked, embedded, rewritten, rewrite, b'unrelated-server')
 
+    def test_thumb_relocator_requires_exact_arm32_same_agent_chain(self):
+        records = [{'policy': 'android-arm64', 'agent_sha256': 'a' * 64},
+                   {'policy': 'android-arm', 'agent_sha256': 'b' * 64}]
+        thumb = {'policy': 'android-arm', 'agent_sha256': 'b' * 64}
+        audit.bind_thumb_compilation(records, [thumb])
+        for invalid in ([], [thumb, thumb], [{**thumb, 'policy': 'android-arm64'}]):
+            with self.assertRaisesRegex(ValueError, 'exactly one actual ARM32'):
+                audit.bind_thumb_compilation(records, invalid)
+        with self.assertRaisesRegex(ValueError, 'same ARM32 Agent'):
+            audit.bind_thumb_compilation(records, [{**thumb, 'agent_sha256': 'c' * 64}])
     def test_workflow_audits_each_profile_before_next_mutation_or_upload(self):
         text = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')
         compatible = text.index('- name: Audit compatible ELF backing consumption')

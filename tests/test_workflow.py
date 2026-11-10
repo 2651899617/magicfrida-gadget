@@ -36,7 +36,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
                 self.assertEqual(actual['default_features'], ['exit-monitor-off', 'signal-interposition-off',
                                                               'agent-entrypoint-rename', 'gadget-json-config'])
-                self.assertEqual(len(actual['files']), 52 if version.startswith('16.') else 57)
+                self.assertEqual(len(actual['files']), 53 if version.startswith('16.') else 58)
                 for feature in (None, *actual['features']):
                     name = (feature or 'compatible') + '.patch'
                     self.assertEqual((output / 'patches' / version / name).read_bytes(),

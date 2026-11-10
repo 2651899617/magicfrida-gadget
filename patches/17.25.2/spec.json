@@ -939,6 +939,18 @@
         }
       ],
       "optional": {}
+    },
+    {
+      "path": "subprojects/frida-gum/gum/arch-arm/gumthumbrelocator.c",
+      "upstream_sha256": "52db2f355ddf39e347c79b8b5322cc64e9bc6a94d2564be102b3fefa8ea6da09",
+      "edits": [
+        {
+          "old": "    /*\n     * Push the current PC onto the stack to make space. This will be\n     * overwritten with the correct address before it is popped.\n     */\n    gum_thumb_writer_put_push_regs (ctx->output, 2, target, ARM_REG_PC);\n",
+          "new": "    /* Thumb PUSH cannot include PC. Save a second low register to reserve\n     * the target slot; it is overwritten before POP restores r0 and PC. */\n    gum_thumb_writer_put_push_regs (ctx->output, 2, target, ARM_REG_R1);\n",
+          "count": 1
+        }
+      ],
+      "optional": {}
     }
   ]
 }

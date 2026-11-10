@@ -214,6 +214,14 @@ def bind_embedded_agent(linked, embedded, rewritten, rewrite, canonical):
     require(canonical.find(rewritten) >= 0, 'canonical server lacks rewritten Agent bytes')
 
 
+def bind_thumb_compilation(records, thumb_records):
+    require(len(thumb_records) == 1 and thumb_records[0]['policy'] == 'android-arm',
+            'exactly one actual ARM32 Thumb relocator compilation required')
+    arm_backing = next(row for row in records if row['policy'] == 'android-arm')
+    require(thumb_records[0]['agent_sha256'] == arm_backing['agent_sha256'],
+            'Thumb relocation repair and ELF backing repair must be linked into the same ARM32 Agent')
+
+
 def audit(source, build, version, profile, config_path, manifest_path, output):
     require(not output.exists(), 'audit output must not exist')
     inputs = Inputs(ROOT)
@@ -245,17 +253,30 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
     for path in (ROOT / 'scripts/audit_elf_backing_ci.py', ROOT / 'scripts/collect_artifacts.py',
                  ROOT / 'scripts/apply_patches.py', ROOT / 'patches/rename.py', ROOT / 'patches' / version / 'spec.json'):
         inputs.add(path)
-    graphs, records = {}, []
+    thumb_relative = 'subprojects/frida-gum/gum/arch-arm/gumthumbrelocator.c'
+    thumb_entry = next(row for row in spec['files'] if row['path'] == thumb_relative)
+    thumb_fixture = inputs.read(ROOT / 'tests/fixtures' / version / thumb_relative)
+    require(sha(thumb_fixture) == thumb_entry['upstream_sha256'], 'pinned Thumb fixture differs')
+    thumb_expected = collector.recipes.profile_bytes(thumb_fixture, thumb_entry, selected)
+    thumb_source = inputs.path(source / thumb_relative)
+    require(inputs.read(thumb_source) == thumb_expected, 'actual Thumb relocator differs from pinned repair')
+    thumb_manifest = [row for row in manifest['patches']['files'] if row['path'] == thumb_relative]
+    require(len(thumb_manifest) == 1 and thumb_manifest[0]['result_sha256'] == sha(thumb_expected),
+            'collector Thumb relocator hash differs')
+    sources = {'gumelfmodule.c': (gum, expected), 'gumthumbrelocator.c': (thumb_source, thumb_expected)}
+    graphs, records, thumb_records = {}, [], []
     for path in sorted((inputs.path(config['report_dir']) / version).glob('*.json')):
         candidate = json.loads(path.read_text(encoding='utf-8'))
-        if Path(candidate.get('source', '')).name != 'gumelfmodule.c':
+        source_name = Path(candidate.get('source', '')).name
+        if source_name not in sources:
             continue
-        require(Path(candidate['source']).resolve() == gum, 'nested Gum consumer differs from canonical repair')
+        consumed_source, consumed_expected = sources[source_name]
+        require(Path(candidate['source']).resolve() == consumed_source, 'nested Gum consumer differs from canonical repair')
         record = inputs.json(path)
         policy = record.get('outline_runtime_policy')
         require(policy in ('android-arm64', 'android-arm') and record.get('status') == 'compiled'
                 and record.get('returncode') == 0 and record.get('source_unchanged') is True
-                and record.get('source_sha256') == sha(expected) and record.get('source_sha256_after') == sha(expected)
+                and record.get('source_sha256') == sha(consumed_expected) and record.get('source_sha256_after') == sha(consumed_expected)
                 and Path(record['config']).resolve() == config_path, 'invalid Gum compilation receipt')
         require(record.get('frida_version') == version and record.get('language') == 'c', 'Gum compiler version/language differs')
         outliner = record.get('outliner_report', {})
@@ -263,8 +284,8 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
                 and outliner.get('input_sha256') == record.get('preprocessed_sha256')
                 and outliner.get('output_sha256') == record.get('transformed_sha256'), 'outlined translation unit differs')
         argv = record['original_expanded_argv']
-        require('-c' in argv and any(Path(record['cwd'], value).resolve() == gum for value in argv
-                                   if value.endswith('gumelfmodule.c')), 'actual compiler source argument missing')
+        require('-c' in argv and any(Path(record['cwd'], value).resolve() == consumed_source for value in argv
+                                   if value.endswith(source_name)), 'actual compiler source argument missing')
         target = 'aarch64' if policy == 'android-arm64' else 'arm'
         require(any(target in value and 'android' in value for value in argv), 'Android target argument differs')
         compiler = record['compiler']
@@ -292,9 +313,9 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
         archives = [node for node in chain if node.suffix == '.a' and 'frida-gum' in str(node)]
         require(len(archives) == 1, 'unique linked Gum archive missing')
         members = archive_members(inputs.read(archives[0]), object_data)
-        source_chain = graph.chain(object_path, gum)
+        source_chain = graph.chain(object_path, consumed_source)
         row = {'policy': policy, 'receipt': str(path.relative_to(ROOT)), 'object': str(object_path.relative_to(ROOT)),
-               'object_sha256': sha(object_data), 'archive_members': members, 'source_sha256': sha(expected),
+               'object_sha256': sha(object_data), 'archive_members': members, 'source_sha256': sha(consumed_expected),
                'agent': str(agent.relative_to(ROOT)), 'agent_sha256': sha(agent_data), 'agent_size': len(agent_data),
                'compiler': compiler, 'compiler_sha256_now': compiler_hash,
                'object_to_agent': [str(node.relative_to(ROOT)) for node in chain],
@@ -304,9 +325,10 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
             server = final_target(inputs, current_build, 'frida-server')
             row['object_to_gadget'] = [str(node.relative_to(ROOT)) for node in graph.chain(gadget, object_path)]
             row['agent_to_server'] = [str(node.relative_to(ROOT)) for node in graph.chain(server, agent)]
-        records.append(row)
+        (records if source_name == 'gumelfmodule.c' else thumb_records).append(row)
     require(len(records) == 2 and {row['policy'] for row in records} == {'android-arm64', 'android-arm'},
             'exactly one actual ARM64 and ARM32 Gum compilation required')
+    bind_thumb_compilation(records, thumb_records)
     deliveries = {}
     for kind in ('server', 'gadget'):
         record = manifest['artifacts'][kind]
@@ -355,7 +377,8 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
     report = {'schema': 1, 'status': 'verified-source-object-archive-agent-server-chain',
               'version': version, 'profile': profile, 'github_commit': __import__('os').environ.get('GITHUB_SHA'),
               'github_run_id': __import__('os').environ.get('GITHUB_RUN_ID'), 'gum_sha256': sha(expected),
-              'compilations': records, 'products': deliveries,
+              'compilations': records, 'thumb_relocator_sha256': sha(thumb_expected),
+              'thumb_relocator_compilations': thumb_records, 'products': deliveries,
               'inputs': {path.relative_to(ROOT).as_posix(): value for path, value in sorted(inputs.records.items())},
               'evidence': {'file': archive.name, 'sha256': file_sha(archive), 'size': archive.stat().st_size},
               'android_runtime_tested': False,

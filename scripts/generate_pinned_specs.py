@@ -27,10 +27,12 @@ EXTRA_GUM_FILES = {
     '16.7.19': {
         'gum/gum.c': '7cb75dacbe8fe3402a1675ac1828a472c84b4fc19f9ab83e0fec4a8ad674434c',
         'gum/gumelfmodule.c': '12b93b344b68b9f641f69252c1415d15543a9bdcdc557d094912dcb269b3983a',
+        'gum/arch-arm/gumthumbrelocator.c': '52db2f355ddf39e347c79b8b5322cc64e9bc6a94d2564be102b3fefa8ea6da09',
     },
     '17.25.2': {
         'gum/gum.c': '62d0a353bafb5edc87adf18460dcc7a0dcf0e1280c81f3c84cbb6e6988e3be4e',
         'gum/gumelfmodule.c': '5d49e38fa7831c62b6a7863f8aed429ec4483793da8f8f3ad374606bd4294a7c',
+        'gum/arch-arm/gumthumbrelocator.c': '52db2f355ddf39e347c79b8b5322cc64e9bc6a94d2564be102b3fefa8ea6da09',
     },
 }
 
@@ -339,6 +341,16 @@ frida_on_load (void)
       }
 '''
                 changes = [edit(old, new)]
+            elif relative.endswith('gumthumbrelocator.c'):
+                changes = [edit('''    /*
+     * Push the current PC onto the stack to make space. This will be
+     * overwritten with the correct address before it is popped.
+     */
+    gum_thumb_writer_put_push_regs (ctx->output, 2, target, ARM_REG_PC);
+''', '''    /* Thumb PUSH cannot include PC. Save a second low register to reserve
+     * the target slot; it is overwritten before POP restores r0 and PC. */
+    gum_thumb_writer_put_push_regs (ctx->output, 2, target, ARM_REG_R1);
+''')]
             elif relative.endswith('gumscriptscheduler.c'):
                 changes = [edit('g_thread_new ("gum-js-loop",', 'g_thread_new ("nianchu-js",')]
             elif relative.endswith('bindings/gumjs/generate-runtime.py') and version.startswith('16.'):
