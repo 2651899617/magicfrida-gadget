@@ -513,3 +513,63 @@
    }
    else
    {
+--- a/subprojects/frida-gum/gum/gummemory.c
++++ b/subprojects/frida-gum/gum/gummemory.c
+@@ -858,7 +858,14 @@
+   {
+     if (!g_hash_table_contains (gum_softened_code_pages, cur_page))
+     {
+-      if (gum_try_mprotect ((gpointer) cur_page, page_size, GUM_PAGE_RWX))
++      GumPageProtection protection;
++
++      /* Reading execute-only code must not add write access. Query failure
++       * leaves the mapping untouched; failed transitions are not cached. */
++      if (gum_memory_query_protection (cur_page, &protection) &&
++          ((protection & GUM_PAGE_READ) != 0 ||
++           gum_try_mprotect ((gpointer) cur_page, page_size,
++               protection | GUM_PAGE_READ)))
+         g_hash_table_add (gum_softened_code_pages, (gpointer) cur_page);
+     }
+   }
+--- a/subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c
++++ b/subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c
+@@ -2272,7 +2272,9 @@
+     }
+   }
+ 
+-  if (need_refill)
++  /* A successful read may contain only part of a maps line. Refill until
++   * a newline is present; EOF, errors and an oversized line return FALSE. */
++  while (need_refill && next_newline == NULL)
+   {
+     guint offset;
+     gssize res;
+--- a/subprojects/frida-gum/gum/backend-linux/gumandroid.c
++++ b/subprojects/frida-gum/gum/backend-linux/gumandroid.c
+@@ -491,7 +491,7 @@
+ #endif
+ #ifdef HAVE_ARM64
+   {
+-    "f4 4f 04 a9 "  /* stp x20, x19, [sp, #0x40]               */
++    "F4 4f 04 a9 "  /* stp x20, x19, [sp, #0x40]               */
+     "fd 7b 05 a9 "  /* stp x29, x30, [sp, #0x50]               */
+     "fd 43 01 91 "  /* add x29, sp, #0x50                      */
+     "ff c3 04 d1 "  /* sub sp, sp, #0x130                      */
+@@ -548,7 +548,7 @@
+ #endif
+ #ifdef HAVE_ARM64
+   {
+-    "f3 03 02 aa "  /* mov x19, x2                             */
++    "F3 03 02 aa "  /* mov x19, x2                             */
+     "f4 03 01 2a "  /* mov w20, w1                             */
+     "f5 03 00 aa "  /* mov x21, x0                             */
+     "?? ?? ?? ?? "  /* adrp x0, #0x150000                      */
+@@ -583,7 +583,7 @@
+ #endif
+ #ifdef HAVE_ARM64
+   {
+-    "fd c3 00 91 "  /* add x29, sp, #0x30                      */
++    "Fd c3 00 91 "  /* add x29, sp, #0x30                      */
+     "f3 03 03 aa "  /* mov x19, x3                             */
+     "f4 03 02 aa "  /* mov x20, x2                             */
+     "f5 03 01 aa "  /* mov x21, x1                             */

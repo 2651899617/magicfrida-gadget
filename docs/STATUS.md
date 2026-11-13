@@ -1,6 +1,122 @@
 # 当前工程状态
 
-记录日期：2026-11-10。
+记录日期：2026-11-13。
+
+## 2026-11-13 定位残留 linker 模式与 DEX 解密密钥状态
+
+精确APK10915 SHA f9ea96b04a146d725a1d2f12ebe51826563ebcdb6d80f527be19997fdcfdb5e6；离线inner ELF SHA fe064a9d1811bdb71d8fe870db2090b72962071c71a18a53fa63169299161a82。已定位 native mCookie 扩展：复制旧槽，每payload output置0，调用0x10380忽略bool并追加包括null的结果，JNI SetObjectField写回；该路径可形成两旧槽加五null的现场数组。运行时是否进入及5次OpenCommon实参尚未捕获。设备Java DexFile.close在native返回false时仍清mCookie，因此不能继续把普通Java close结束后留下非空部分零mCookie作为主要解释。
+
+完整恢复壳0x6b994的3个ASCII扫描模式（83/119/143字节），在正式c3bc内嵌ARM64Agent中全部各1次，Agent偏移0x235b1b/0x1874a0/0x222197；Agent SHA87f64f44fc2601c82dda6c33522b2fbc71c0fb51e5682071c12468ff45cf67b4。壳直接搜索文本，??/?4也是literal字节；现有线程改名不处理此特征。gum-js-loop/gmain/linjector及/subprojects/frida直接count0，现场nianchu-js，剩余gdbus都是路径/标识/日志。
+
+关键更正：sp+0x80+0x420就是sp+0x4a0；0x2291c重读已受sp28状态影响的16字节，0x2292c写入global0x129588所指实际SM4密钥。此前“比较缓冲区与密钥分离”判断错误并撤回。0x6b994匹配后状态0x1d，经密钥影响DEX解密；当前已确定静态连接，未动态捕获配置/状态/返回。API29 OpenCommon size来自DEX头base+0x20的file_size，而非外层descriptor长度；magic/version/过短size可返回null，verify和verify_checksum均false。
+
+本地16源码候选已实施：固定 `gumandroid.c` 只改变三条ARM64模式的首字母 `f`→`F`，实际指令值、通配掩码、位移和解析路径保持。上游SHA `4a48a4b32cd93335440cc5c05e01ee93ea877b15ab5da0e7ee04d783a8f81dcd`，结果SHA `0b1a1d3a2c110d142ca8f687d6018f71c22b0b1a466173a20e3332eabab4f465`。16固定文件55→56，17 recipe保持。61项定向检查通过；使用既有固定依赖venv完成394项完整离线回归：389通过、5跳过、0失败、0错误，源码前后身份一致，耗时235.758秒。跳过项为旧Gadget实物、Windows符号链接权限两项、Host Clang扩展和valac。首轮系统Python缺解析器依赖导致失败的记录仍保留，没有安装依赖或改全局配置。
+
+云端audit和独立下载核验均新增第五项 `gumandroid.c`：两架构真实编译回执→object→Gum archive→同Agent绑定，并检查链接ARM64Agent及server内嵌资源三个旧literal为0、新literal存在。独立核验按1MiB分块，165项流式边界/计数/schema拒绝检查通过，精确c3bc旧产品被正确拒绝。这是核验器逻辑与负对照结果；新GitHub产物的完整消费链尚未运行，不能当作已构建或已部署。
+
+本阶段完成本地源码候选、静态分析及离线验证；没有新增spawn/切服/reboot/设备命令，未更新生产server、commit/push/CI或完成业务/真实q验收。手机c3bc不含候选。正式修复仍待新GitHub构建和com.moutai.mall10915的原父进程、Agent、业务UI、unload/detach、真实CLI q及server退出/framework验收；17未测。完整报告 `work/current-evidence/moutai10915-helper-decoded-20261113-a/state-dex-chain.md`，原始结果在同目录 `linker-pattern-regression-b/report.json`、`linker-pattern-streaming/report.json` 和state-strings-e。下列设备身份只保留此前采集时状态。
+
+
+## 2026-11-13 新 boot 的原生与单页 RX 对照仍复现空 DexFile
+
+发现设备 boot 已变为 `07e81a42-245b-4095-877d-16ec8e4b8631`；本轮没有执行 reboot。注入前 framework1048/704/705、Agent映射0、linker代码完整RX。普通启动父进程18756持续存活超过75秒，后到LoginActivity；UI提取控件0且未视觉审查，只记录普通启动存活，不称业务通过。
+
+只启动已核验c3bc默认server20810/ticks4309670，argv仅绝对exe、默认27042，ready回执核对owned socket inode512376。默认preload会注入系统Agent，因此server存在对照不等于纯进程存在实验。启动后zygote704的linker offset0x53000页RWX，设备ELF符号确认RVA0x53344为 `rtld_db_dlactivity`；该处原RET字节c0035fd6被改为B，页内只有这4字节不同。
+
+原生heartbeat测试App21289没有调用Java、没有业务hook，ready后resume仍于00:48:11+0800复现 `OatDexFile::FindClassDef+12`、fault0xa8、x0=0。故Java.available初始化不是本次故障的必要条件。第一个native-rx实验21686因字节严格guard失败而没有实施权限修改；不计为RX实验。
+
+有效RX单变量实验App23926/ticks4365185保留活动hook及全部4096字节，仅把App内linker offset0x53000页RWX改为RX；ready及heartbeat收到，权限后字节SHA保持8d6368de71fea7643b25f134b180f78b6a3bdde47ea15213f7862fe7955359fa。5.49秒身份保持，10.62秒原进程消失；00:54:17+0800同0xa8崩溃，cookie长度7、index0/1非零、index2..6零。匹配tombstone_02 SHA ca632313ebff407fbaf0aeb5b26f46eeb21ec5a25472be1965c65a8fe1dcb789确认实验页到崩溃仍RX，另出现offset0x3c000 RWX（该页包含 `do_dlopen` 入口）。因此只排除“恢复0x53000这一页即可解决”，未排除其它hook/权限变化、默认preload副作用或App侧响应。script destroyed是目标SIGSEGV后的清理结果，不当作新根因。
+
+最新只读核验App为空，server20810及framework身份保持、boot保持；没有停服、追加spawn、系统attach、改fake/SELinux或清数据。新App兼容性仍未修复，正式产品未改变。证据：moutai10915-fresh-boot-20261113-a、moutai10915-default16-ready-20261113-a、moutai10915-native16-20261113-b、moutai10915-native16-linker-rx-20261113-b、moutai10915-rx-final-20261113-a。以下“App/server为空”等旧节为当时状态。
+
+静态补充：23926的x1/x3内存实捕类描述符 `Lcom/moutai/mall/MTApp;`，实际失败发生在壳实例化目标Application查找MTApp。Android10参考closeDexFile会保留已注册DexFile并清零其它槽；设备匹配libart符号 `DexFile_closeDexFile` RVA0x413458/size1704，RVA0x413794字节1f7b36f8为写0到cookie当前槽。该路径能形成所见部分清零状态，但未证明本次调用及调用方，不据此patch ART。完整反汇编在moutai10915-art-cookie-close-20261113-a，参考源码在moutai10915-cookie-reference-20261113-a。
+
+源码消费链按HEAD核验Gum pin88e78178f786bf8cea2172ed6aeff335f30dd299；rtld_db_dlactivity/r_brk hook为官方保留路径，未被recipe修改。CI实际应用edits和default_features，已交付默认signal-interposition-off移除整个POSIX Exceptor安装（包括SIGSEGV/SIGBUS等）及signal/sigaction替换，exit-monitor-off移除exit/_exit/abort准备拦截；均为实际兼容性变量，尚未证明本次因果。native无Java仍包含Gum/Exceptor对象/module registry初始化，不能称零内部hook。独立汇总 `work/current-evidence/moutai10915-rx-final-20261113-a/conclusions.md`。git diff --check退出0，未重跑完整构建或把离线验证计作App验收。
+
+## 2026-11-12 新 App com.moutai.mall 1.9.15/10915 尚未通过
+
+用户报告裸CLI `frida -U -f com.moutai.mall` 已spawn/resume，但App19533于2026-11-11 23:09:56+0800在ART类查找时SIGSEGV，fault0xa8。设备版本实核1.9.15/10915、UID10322、ARM64；旧技能案例1.9.12/10912不适用，未复用偏移。保存匹配tombstone_09及设备libart，BuildId ccd73e8ae9b59d5596b3b8aeef234d43、SHA6419d690ecbdc247b348199f27b1f2819829bbb275d4b3bec3f35ec4e284c22c。
+
+ARM64调用处读取Dex cookie第2槽为0，作为x0传入静态 `OatDexFile::FindClassDef(const DexFile&,...)`；RVA0x44e0e8对应 `ldr x8,[x0,#0xa8]`。空的是传入DexFile，不是OatDexFile::this。tombstone确认cookie长度7、index0/1非零、index2..6为0；Android10参考源码遍历index1起的所有槽，没有逐槽判空。已定位直接崩溃机制，但未证明哪个组件创建/清空cookie。可读取的调用处256字节与设备磁盘libart一致；PC页为--x，未实捕该页运行时字节。
+
+原App有nianchu-cache Agent、无完整offset0带路径ART解析副本；采集时server16已不存在，不能凭Agent名称反向确认当次server SHA。普通启动仅做一次明确组件am start，15秒等待超时后出现反复fork子进程、PC0x978/SP0/LR0的另一类崩溃，Splash不能验收。保存最新tombstone_03（App2800，00:55:24，Agent映射0），随后一次am force-stop仅结束本次App崩溃循环；App/server为空，framework1041/694/695和boot fbc92c19保持，没有重启、清数据、改fake UID、安装模块或追加注入。
+
+当前zygote64 linker64文件offset0x53000的一页仍RWX；只读精确比较4096字节已与磁盘完全一致，0不同字节，SHA be161c487d3c0c19b26090c5f21c4dc6b69b8fff298c3c2ce905a17f1f411cff。代码恢复但权限保留；该页亦在此前同boot修复产品验收映射里。Gum原有gum_memory_patch_code在RWX系统不恢复页权限，与残留候选吻合，尚未证明新App检测此页或其引起空cookie。当前读取权限候选只改ensure_code_readable，不解决patch_code/Interceptor写后残留；不得称现有候选已经修复此问题。
+
+诊断 `work/current-evidence/moutai10915-art-crash-20261112-a/diagnosis.md`；普通启动证据在moutai10915-plain-20261112-a。新App可用性未通过，正式源码和产品未改变，未自动执行新的reboot；仍需稳定普通启动基线、实际server身份和官方16/魔改16对照后收敛server补丁。
+
+## 2026-11-11 默认端口手动spawn及按用户要求停服
+
+专用47016测试与用户默认27042启动曾同时存在两份c3bc产品；用户默认CLI超时发生在创建App PID前，system_server记录ProcessStartResult.pid空对象，不能当作旧Provider/NPE或直接认定双server是唯一根因。用户默认PID14915后来退出，未向其发信号；只对助手明确归属PID9316单次TERM，pending spawn/children为空，移除owned18851→47016转发，系统Agent映射随后为0。
+
+随后只启动一份无额外参数的同路径c3bc server，PID17697/ticks158942、默认端口，无手动转发。用户明确反馈“我刚刚手动测试 可以spwan”，并要求停掉server；按fresh完整身份及SHA核验后单次TERM17697，确认已退出、server PID为空、framework与boot保持。此处spawn成功是用户反馈，不扩大为助手已完成真实CLI q/完整业务验收。以下旧节的9316/13136“保持运行”是当时历史状态，已不是当前状态。
+
+## 2026-11-11 修复 server16 在新boot下完成三轮spawn验收
+
+用户明确选择切换并实测。精确复核时旧server18976已经退出，无其他server，不追加信号；正常ADB reboot后新boot `fbc92c19-4608-406e-93e4-7d013e06bbdb`，framework1041/694/695。注入前核对正常ART映射无旧Agent/完整解析副本；恢复仅ROOT fake（UID10323，fake1/nokill0，附加监控关闭），只启动已核验 `/data/local/tmp/nianchu-server16-42803346600/server16`。当前server9316、start_ticks54377，运行SHA `c3bc3731a835f40fe844bd286e6b5f87aa835028616da8ba72c7853ff9c3a96d`，本机转发127.0.0.1:18851→设备127.0.0.1:47016，启动--disable-preload。
+
+对App7.51.0/751002完成三轮：裸spawn/resume App9703（ticks61077）；两次spawn/attach/ready+heartbeat/resume App11355（ticks67644）、App13136（ticks74854）。各自原父进程存活≥25秒，进入SignInActivity，UI树有登录/注册控件；本轮Provider/NPE与主线程FATAL为0，无目标退出信号。两次script unload/detach成功，退出会话后同一App仍活；framework及server完整身份保持，policy测试前后SHA一致。最终点击登录入口获得即时协议提示响应，未输入或提交账户信息；最新mResumedActivity为PhoneOrEmailLoginActivity，App13136、ppid694、State S。
+
+三轮App及最终系统进程均无完整7,696,384字节offset0带路径ART解析副本，说明匿名backing修复在真实Agent生效。此前旧默认文件SHA1c37df…所复现的Provider/NPE，在当前修复映像三轮中未复现。旧 `/data/local/tmp/server16` 文件未覆盖；用户当前应使用上述已运行的独立修复路径，避免再次启动旧文件。
+
+**已通过口径：本设备/版本/ROOT fake条件下裸spawn/resume和连续两次Agent脚本生命周期、登录页UI响应。** 首页业务未登录验收，截图未视觉审查，真实CLI q及server进程退出/ARM32系统Agent卸载未测试；不将SDK detach替代这些项目。17未测。读取权限/maps短读候选尚未进入此运行产品，当前无新commit/push/CI。
+
+报告 `work/current-evidence/repaired16-cleanboot-start751002/acceptance.md` 和 `acceptance-summary.json`；三轮原始报告分别为repaired16-cleanboot-bare751002、repaired16-cleanboot-heartbeat1-751002、repaired16-cleanboot-heartbeat2-751002。修复server9316及App13136保持运行。
+
+## 2026-11-11 用户实测当前魔改 server16 spawn 重现 Provider/NPE
+
+当前主任务是魔改server16的可用性；普通fake启动仅是基线，不将Root谓词/VM研究替代server修复。用户在同一新boot自行使用server16 spawn后报告崩溃。只读采集确认App19106于1794407200.601创建，1794407205.132发生主线程 `Unable to get provider androidx.startup.InitializationProvider`、`AppInitializer.doInitialize(SourceFile:13)` 空List.isEmpty NPE，1794407205.240退出signal9。普通App10093此前在1794407200.008被ActivityManager force-stop，不能将其退出当作检测自毁。
+
+用户当前运行的 `/data/local/tmp/server16` 为PID18976、start_ticks733081、PPID18923、SHA `1c37df2853c03589c67ba83a5bc44f78dd49751be26ff9ff67a17e305955547c`、size54198952，对应4516059/run42499266252，不含后来ART parser匿名backing及Thumb修复。zygote64 697现在存在完整7,696,384字节offset0带路径ART解析副本 `0x713fd7a000–0x71404d1000`，system_server1033也有完整副本；与此前独立backing正反对照所确认的NPE触发条件一致。本次App19106已退出，没有其直接maps，不把当前系统映射冒充该App快照。
+
+含修复的124e/run42803346600产品已在 `/data/local/tmp/nianchu-server16-42803346600/server16`，设备和主机文件SHA `c3bc3731a835f40fe844bd286e6b5f87aa835028616da8ba72c7853ff9c3a96d`、size54198952核验通过；既有双架构源码→对象→归档→Agent→server独立消费链报告存在。但此前该产品在另一个已注入boot中更早SIGKILL，仍不代表当前fake条件下spawn通过。它不包含未提交的读取权限/maps短读候选。
+
+保持用户正在运行的server18976，未发信号、未追加注入或启动第二server。有效新产品验收需先允许停止当前已确认server并重启，使zygote不继承当前旧Agent；不得把双server环境当成干净对照。诊断与可核验原始证据： `work/current-evidence/operator-modified16-spawn751002/diagnosis.md`。本次魔改server可用性未通过，未宣布修复完成。
+
+## 2026-11-11 重启后开启 Root fake，普通启动到达登录页
+
+用户要求重启并开启fake测试。此前仅发出重启说明而未执行的错误已纠正；实际ADB reboot后boot变为 `ab6bc030-7f04-42a9-8de0-d5ce4cb624e7`，framework为system_server1033、zygote64 697、zygote698。系统启动完成后，经APatch临时加载既有 `nianchu-syscall-crash`，设备模块与技能包SHA均为 `30fdfce8979d44c96b84da0fef9b52a448c715dc23f4a77128f9595c89c84ace`。没有读取SuperKey，没有运行setup_device.py，没有启动Frida server、加载maps模块或修改SELinux。
+
+内核回执确认uidadd=10323和 `trace=1 fake=1 nokill=0 dump=0 exitmon=0 memmon=0 pathmon=0 sysmon=0 resolve=1 ROOT=1 FRIDA=0 XPOSED=0 AOSP=0 uidcount=1`。仅Root路径类别启用；本次日志有358条fake:1路径记录，包括/system/bin/su等返回-ENOENT。日志中tgid字段显示697而tid显示10093，不使用该tgid字段证明App父进程；身份以/proc/10093/stat的start_ticks100053、ppid697核对。
+
+一次普通 `am start -W` 创建父进程10093，25秒内身份保持，20秒时进入SignInActivity；UI树显示登录、注册控件。点击登录入口立即产生“请勾选同意协议后再进行操作”响应，未填写或提交账号信息；后续实际Activity为PhoneOrEmailLoginActivity，同一父进程已持续170.94秒。framework身份与policy SHA前后一致，前后无server进程。报告 `work/current-evidence/plain-fake-reboot751002/report.json`、UI摘要及截图已保存；截图尚未进行视觉审查，不把截图保存本身当作视觉验收。
+
+当前结论：重启加Root fake的普通启动已能打开并响应登录页面，完整首页业务与Frida spawn仍未验收。由于没有同一新boot下fake关闭的冷启动对照，本次结果未单独区分重启和fake的因果贡献，不能据此宣布魔改server问题已修复。保持fake开启和App运行，后续先只读采集稳定进程。
+
+## 2026-11-11 当前普通启动失败，纠正 spawn 因果归因
+
+用户指出“不spawn App也进不去”。该观察与本轮证据一致：在没有Frida注入、没有spawn操作的普通 `am start` 中，App10152、10321、11600均被SIGKILL。最新11600（start_ticks3001857，parent700）于1794393227.757创建，1794393227.994退出signal9，约237ms；本轮helper仅读取/proc，未写App内存、未发送设备信号。故“当前退出由新server16/spawn直接造成”的归因不成立；当前按普通启动故障定位，暂停重复spawn和部署候选server。
+
+所有上述实验都在boot `a14ed9f2-e93a-4e52-9da8-915023492618` 中，早于普通启动已注入并卸载过系统Agent。无注入前基线，所以这些结果也不证明魔改无问题，尚需区分环境/策略/App状态与注入残留。此前带路径ART解析副本与AppInitializer/NPE的一次性对照仍是独立已验证问题，不与当前更早SIGKILL合并归因；读取权限/maps短读候选是已复现源码缺陷，其385通过/4跳过不代表App修好。
+
+最新只读采集 `work/current-evidence/plain-bound-frames751002/report.json` 保存同PID两库8个映射的first/last共16个完整快照，helper保留数据4,259,840字节、整体预算8MiB/8秒，退出后独立文件已按SHA删除；framework PID/start_ticks/exe与policy SHA前后一致。libexec本次匿名RVA0x44000、753664字节SHA `55504a2c0860558443d6ef6b20b5de657fa3cc96ec6b474a1c1c3c1b91451da7`，3次采样代码一致；数据段74字节变化。libexecmain匿名RVA0x15000、798720字节SHA `f468a35ca3f0e55bc47e5f6176c3dc954e5b40dd066c8cfb92e97ce62093bafc`。不复用10321本次RVA0x46000或旧750043偏移。
+
+同次原生链接表已恢复mprotect/syscall/kill导入、constructor表及JNI_OnLoad RVA0x7666c。退出helper0x47bfc–0x47d98通过getpid取得自身PID，0x47d7c执行kill(9)，状态flags483/494在采样中均0；指针槽0x116140经壳VM表0x116000调度。另定位代码校验0x4e1ec–0x4e354（尝试RX后比较磁盘4字节）和权限函数0x4e744–0x4e9d0（maps扫描、mprotect、返回状态），以及0x4cc34中比较0x58000051/0xd61f0220的代码签名。仅为静态已存在路径，尚无运行时pc/lr证明哪个退出点触发，未建立execmod拒绝到SIGKILL完整因果；未patch App/VM/JNI。
+
+下载后新核验工具 `work/nianchu-cloud-delivery-tools-20261110-a/verify_cloud_evidence16_repairs_streaming.py` 已覆盖backing/Thumb/读取权限/maps四修正的源码→双架构回执→对象→归档→同Agent→重写资源→server字节链，要求显式完整commit/run与干净可信checkout。语法检查通过，旧124e缺新fixture及短commit在读大归档前拒绝；新云端正向消费链尚未执行，没有新commit/push/CI。原生静态Agent因模型限流终止，无结果，不计为审计通过。
+
+## 2026-11-11 16真机对照及代码读取权限候选
+
+提交 `124e15430ebef43f14ed7c8c74cfea5d618a55c6` 的 run [42803346600](https://github.com/2651899617/magicfrida-gadget/actions/runs/42803346600) 已成功；归档13772628518完整785,947,404字节，SHA `5c902658c9f72ea7df0a97cedfc4bda8527f64c89e4f712a85719eee09f98c8c`。16两profile各49个来源输入独立核验，手机独立文件 `/data/local/tmp/nianchu-server16-42803346600/server16` 的SHA `c3bc3731a835f40fe844bd286e6b5f87aa835028616da8ba72c7853ff9c3a96d`、大小54,198,952、权限755通过。用户“启动 测试”后执行本轮实验；17未部署或测试。
+
+新16心跳App20429、官方16.7.19同脚本App2213、新16无attach/JS裸spawn3521、官方裸spawn4250均SIGKILL。当前boot的普通启动1387也SIGKILL，但发生在系统Agent注入/卸载之后；不能视为注入前基线，不能因此推出魔改无问题。裸spawn的真实maps显示新16只有正常4段ART映射，官方额外有7,696,384字节同路径完整ART解析副本；backing修正在新产品上生效，App先退出，原Provider/NPE及业务尚未验收。
+
+手机此前已重启，原生产7316在本轮交付前已不存在。候选19867/3084、官方1718/3946均按本轮完整身份及运行SHA核对后单次TERM退出；未向生产、zygote或system_server发信号。最新boot `a14ed9f2-e93a-4e52-9da8-915023492618`，framework1121/700/701身份保持，三系统进程Agent映射计数均0，无测试server。卸载后ART/log代码字节与磁盘一致，libc部分字节也一致但仍RWX；这不等于未经注入状态。官方server自身启动会调用SELinux policy初始化，因此getenforce不变不足以证明策略完全不变；本轮未手动修改策略，后续不以重复启动扩展该影响。
+
+源码确认16 `gum_ensure_code_readable()` 在API29以上直接把读取代码页改为RWX。本轮16-only候选改为查询原权限，已可读不改，不可读仅增加READ，保留已有WRITE/EXECUTE，失败不缓存。固定新增fixtureSHA `b04af3b6b0fd39cceb085f4c5934dc116059cc03509de3fd3eb72a047af111f8`；生成器/recipe及云端gummemory两架构对象→归档→同Agent消费链联动。**只修代码读取的误加WRITE，不称Memory.patchCode/Interceptor全部权限残留已修复，也未证明这是当前SIGKILL根因。** ART/log execmod拒绝先于退出，kill调用者尚未定位。
+
+定向57项、0失败/错误/跳过，154.644秒，报告 `work/nianchu-readability16-focused-regression-20261111-d/report.json`；包含实际提取旧/新C函数编译执行（旧11/新0）、跨页及失败重试、消费链绑定拒绝、生成器/feature/patch重放和workflow契约。首轮三次WinError5临时文件替换失败在独立临时目录同源码重跑通过。完整报告 `work/nianchu-readability16-diagnosis-20261111.md`。本候选尚未commit/push/构建新产品或真机验收，手机文件不包含本候选。
+
+完整回归首轮e为386项、3失败、3错误、66跳过，报告保留；临时目录含中文及frida、未显式选择测试编译器导致路径拒绝、raw literal多匹配和大量原生用例跳过。改用独立ASCII目录 `C:/Users/2651899617/AppData/Local/Temp/nso-suite-20261111-f` 及已安装主机GCC/G++、NDK25 Clang，未修改产品源码或放宽断言。六个原问题及两个读取权限测试8/8复测通过。最终完整回归 **386项、382通过、0失败、0错误、4环境跳过**，247.235秒，全部受检scripts/tests/fixtures/recipes SHA/size前后一致，报告 `work/nianchu-readability16-full-regression-20261111-f/report.json`。跳过为Windows符号链接权限两项、host GCC缺GNU99定基enum扩展一项、缺valac一项；不计为通过。这是源码/小型fixture验证，未执行本机完整Android产品构建。
+
+最新只读状态 `work/nianchu-phone-readonly-20261111-f/report.json`：boot及framework1121/700/701保持，无server。两次限时无Frida普通启动采集f/g均未取得完整匿名RX字节，App7749/7933均SIGKILL；各自保存当前日志窗口及报告，host watcher退出，未发送信号或写设备策略。f识别libexec相邻匿名RX745,472字节，整份maps作为printf单参数触发参数长度限制且未读到字节；g限定目标相邻行后仍未抓到完整代码。没有据失败采集定位补丁或扩展设备操作。
+
+真实完整gummemory.c候选使用既有NDK25 ARM64头文件完成源码对象、保留行来源预处理、当前outliner及转换后对象四阶段，均rc0，源码/头文件身份保持；报告 `work/nianchu-readability16-authentic-tu-20261111-g/report.json`。这仅一个完整TU，不是本机完整产品构建，不声明ARM32或Android业务验收。只读审计确认该16 recipe没有maps过滤或FILE/fd替换，但上游maps迭代器补读一次后可能解引用NULL换行指针。实际提取函数完整read退出0、每次20字节短读访问异常0xc0000005，未建立与App SIGKILL的因果。
+
+16新增固定gumprocess-linux.c fixtureSHA `7a9f4120eb724d2611a558ddd91db9dabc69e3c82c2ee937111291ce7ac0e935`，与固定上游归档逐字节一致；读取权限查询依赖该迭代器，因此候选补读至完整换行，EOF/读取错误/超长行返回FALSE，不增加过滤或改fd生命周期。generator/recipe固定文件16增为55、17仍58；云端审计加入两架构maps源码→实际编译回执→对象→Gum归档→同Agent绑定。定向26/26通过，最终 **389项、385通过、0失败、0错误、4环境跳过**，296.604秒，受检源码/fixture/recipe身份一致；报告 `work/nianchu-mapsread16-full-20261111-i/report.json`。首轮新增harness计数器int/size_t严格编译失败已按size_t修正，未放宽-Werror。当前候选仍未commit/push/新CI或手机部署；App SIGKILL及业务修复验收仍未完成。
+
+旧751002 live dump漏采相邻匿名RX解密段（libexec753,664字节、libexecmain798,720字节），已有首段不够定位退出。一次无Frida只读短窗口采集未取到遗漏段，超时后host watcher退出，reconcile确认目标已退出、无遗留采集进程及framework/boot保持；不套用750043偏移。
+
 
 ## 2026-11-10 Thumb 双架构消费链审计修正，仅重建16
 

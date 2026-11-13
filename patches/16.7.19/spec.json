@@ -883,6 +883,52 @@
         }
       ],
       "optional": {}
+    },
+    {
+      "path": "subprojects/frida-gum/gum/gummemory.c",
+      "upstream_sha256": "b04af3b6b0fd39cceb085f4c5934dc116059cc03509de3fd3eb72a047af111f8",
+      "edits": [
+        {
+          "old": "      if (gum_try_mprotect ((gpointer) cur_page, page_size, GUM_PAGE_RWX))\n        g_hash_table_add (gum_softened_code_pages, (gpointer) cur_page);\n",
+          "new": "      GumPageProtection protection;\n\n      /* Reading execute-only code must not add write access. Query failure\n       * leaves the mapping untouched; failed transitions are not cached. */\n      if (gum_memory_query_protection (cur_page, &protection) &&\n          ((protection & GUM_PAGE_READ) != 0 ||\n           gum_try_mprotect ((gpointer) cur_page, page_size,\n               protection | GUM_PAGE_READ)))\n        g_hash_table_add (gum_softened_code_pages, (gpointer) cur_page);\n",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c",
+      "upstream_sha256": "7a9f4120eb724d2611a558ddd91db9dabc69e3c82c2ee937111291ce7ac0e935",
+      "edits": [
+        {
+          "old": "  if (need_refill)\n  {\n    guint offset;\n",
+          "new": "  /* A successful read may contain only part of a maps line. Refill until\n   * a newline is present; EOF, errors and an oversized line return FALSE. */\n  while (need_refill && next_newline == NULL)\n  {\n    guint offset;\n",
+          "count": 1
+        }
+      ],
+      "optional": {}
+    },
+    {
+      "path": "subprojects/frida-gum/gum/backend-linux/gumandroid.c",
+      "upstream_sha256": "4a48a4b32cd93335440cc5c05e01ee93ea877b15ab5da0e7ee04d783a8f81dcd",
+      "edits": [
+        {
+          "old": "\"f4 4f 04 a9 \"",
+          "new": "\"F4 4f 04 a9 \"",
+          "count": 1
+        },
+        {
+          "old": "\"f3 03 02 aa \"",
+          "new": "\"F3 03 02 aa \"",
+          "count": 1
+        },
+        {
+          "old": "\"fd c3 00 91 \"",
+          "new": "\"Fd c3 00 91 \"",
+          "count": 1
+        }
+      ],
+      "optional": {}
     }
   ]
 }

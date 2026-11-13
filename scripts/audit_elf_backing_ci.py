@@ -227,6 +227,63 @@ def bind_thumb_compilation(records, thumb_records):
                 'Thumb relocation repair and ELF backing repair must be linked into the same Agent for ' + thumb['policy'])
 
 
+def bind_code_readable_compilation(records, readable_records):
+    policies = {'android-arm64', 'android-arm'}
+    require(len(readable_records) == 2 and {row['policy'] for row in readable_records} == policies,
+            'exactly one actual ARM64 and ARM32 code readability compilation required')
+    require(len(records) == 2 and {row['policy'] for row in records} == policies,
+            'ELF backing compilation required for code readability binding')
+    backing = {row['policy']: row for row in records}
+    for row in readable_records:
+        require(row['agent_sha256'] == backing[row['policy']]['agent_sha256'],
+                'Code readability repair and ELF backing repair must be linked into the same Agent for ' + row['policy'])
+
+
+def bind_proc_maps_compilation(records, maps_records):
+    policies = {'android-arm64', 'android-arm'}
+    require(len(maps_records) == 2 and {row['policy'] for row in maps_records} == policies,
+            'exactly one actual ARM64 and ARM32 maps reader compilation required')
+    require(len(records) == 2 and {row['policy'] for row in records} == policies,
+            'ELF backing compilation required for maps reader binding')
+    backing = {row['policy']: row for row in records}
+    for row in maps_records:
+        require(row['agent_sha256'] == backing[row['policy']]['agent_sha256'],
+                'Maps reader repair and ELF backing repair must be linked into the same Agent for ' + row['policy'])
+
+
+def bind_linker_pattern_compilation(records, linker_records):
+    policies = {'android-arm64', 'android-arm'}
+    require(len(linker_records) == 2 and {row['policy'] for row in linker_records} == policies,
+            'exactly one actual ARM64 and ARM32 linker pattern compilation required')
+    require(len(records) == 2 and {row['policy'] for row in records} == policies,
+            'ELF backing compilation required for linker pattern binding')
+    backing = {row['policy']: row for row in records}
+    for row in linker_records:
+        require(row['agent_sha256'] == backing[row['policy']]['agent_sha256'],
+                'Linker pattern repair and ELF backing repair must be linked into the same Agent for ' + row['policy'])
+
+
+def linker_pattern_spellings(source):
+    result = []
+    for name in ('gum_dlopen_signatures_api245', 'gum_dlopen_signatures_api26p', 'gum_dlsym_signatures_api26p'):
+        block = source.decode('utf-8').split('static const GumFunctionSignature ' + name + '[]', 1)[1].split('\n};', 1)[0]
+        block = block.split('#ifdef HAVE_ARM64', 1)[1].split('#endif', 1)[0]
+        result.append(''.join(json.loads('"' + item + '"') for item in re.findall(r'"([^"\n]*)"', block)))
+    return result
+
+
+def verify_linker_pattern_literals(agent, spellings):
+    rows = []
+    for text in spellings:
+        fixed = text.strip().encode('ascii')
+        old = fixed[:1].lower() + fixed[1:]
+        require(fixed != old and agent.count(fixed) > 0, 'new linker pattern literal absent from ARM64 Agent')
+        require(agent.count(old) == 0, 'old linker pattern literal remains in ARM64 Agent')
+        rows.append({'old_sha256': sha(old), 'new_sha256': sha(fixed),
+                     'old_count': 0, 'new_count': agent.count(fixed)})
+    return rows
+
+
 def audit(source, build, version, profile, config_path, manifest_path, output):
     require(not output.exists(), 'audit output must not exist')
     inputs = Inputs(ROOT)
@@ -269,7 +326,46 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
     require(len(thumb_manifest) == 1 and thumb_manifest[0]['result_sha256'] == sha(thumb_expected),
             'collector Thumb relocator hash differs')
     sources = {'gumelfmodule.c': (gum, expected), 'gumthumbrelocator.c': (thumb_source, thumb_expected)}
-    graphs, records, thumb_records = {}, [], []
+    readable_expected = None
+    maps_expected = None
+    linker_expected = None
+    linker_spellings = []
+    if version == '16.7.19':
+        readable_relative = 'subprojects/frida-gum/gum/gummemory.c'
+        readable_entry = next(row for row in spec['files'] if row['path'] == readable_relative)
+        readable_fixture = inputs.read(ROOT / 'tests/fixtures' / version / readable_relative)
+        require(sha(readable_fixture) == readable_entry['upstream_sha256'], 'pinned code readability fixture differs')
+        readable_expected = collector.recipes.profile_bytes(readable_fixture, readable_entry, selected)
+        readable_source = inputs.path(source / readable_relative)
+        require(inputs.read(readable_source) == readable_expected, 'actual code readability source differs from pinned repair')
+        readable_manifest = [row for row in manifest['patches']['files'] if row['path'] == readable_relative]
+        require(len(readable_manifest) == 1 and readable_manifest[0]['result_sha256'] == sha(readable_expected),
+                'collector code readability hash differs')
+        sources['gummemory.c'] = (readable_source, readable_expected)
+        maps_relative = 'subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c'
+        maps_entry = next(row for row in spec['files'] if row['path'] == maps_relative)
+        maps_fixture = inputs.read(ROOT / 'tests/fixtures' / version / maps_relative)
+        require(sha(maps_fixture) == maps_entry['upstream_sha256'], 'pinned maps reader fixture differs')
+        maps_expected = collector.recipes.profile_bytes(maps_fixture, maps_entry, selected)
+        maps_source = inputs.path(source / maps_relative)
+        require(inputs.read(maps_source) == maps_expected, 'actual maps reader source differs from pinned repair')
+        maps_manifest = [row for row in manifest['patches']['files'] if row['path'] == maps_relative]
+        require(len(maps_manifest) == 1 and maps_manifest[0]['result_sha256'] == sha(maps_expected),
+                'collector maps reader hash differs')
+        sources['gumprocess-linux.c'] = (maps_source, maps_expected)
+        linker_relative = 'subprojects/frida-gum/gum/backend-linux/gumandroid.c'
+        linker_entry = next(row for row in spec['files'] if row['path'] == linker_relative)
+        linker_fixture = inputs.read(ROOT / 'tests/fixtures' / version / linker_relative)
+        require(sha(linker_fixture) == linker_entry['upstream_sha256'], 'pinned linker pattern fixture differs')
+        linker_expected = collector.recipes.profile_bytes(linker_fixture, linker_entry, selected)
+        linker_source = inputs.path(source / linker_relative)
+        require(inputs.read(linker_source) == linker_expected, 'actual linker pattern source differs from pinned repair')
+        linker_manifest = [row for row in manifest['patches']['files'] if row['path'] == linker_relative]
+        require(len(linker_manifest) == 1 and linker_manifest[0]['result_sha256'] == sha(linker_expected),
+                'collector linker pattern hash differs')
+        linker_spellings = linker_pattern_spellings(linker_expected)
+        sources['gumandroid.c'] = (linker_source, linker_expected)
+    graphs, records, thumb_records, readable_records, maps_records, linker_records = {}, [], [], [], [], []
     for path in sorted((inputs.path(config['report_dir']) / version).glob('*.json')):
         candidate = json.loads(path.read_text(encoding='utf-8'))
         source_name = Path(candidate.get('source', '')).name
@@ -325,15 +421,23 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
                'compiler': compiler, 'compiler_sha256_now': compiler_hash,
                'object_to_agent': [str(node.relative_to(ROOT)) for node in chain],
                'source_to_object': [str(node.relative_to(ROOT)) for node in source_chain]}
+        if source_name == 'gumandroid.c' and policy == 'android-arm64':
+            row['linker_pattern_literals'] = verify_linker_pattern_literals(agent_data, linker_spellings)
         if policy == 'android-arm64':
             gadget = final_target(inputs, current_build, 'frida-gadget')
             server = final_target(inputs, current_build, 'frida-server')
             row['object_to_gadget'] = [str(node.relative_to(ROOT)) for node in graph.chain(gadget, object_path)]
             row['agent_to_server'] = [str(node.relative_to(ROOT)) for node in graph.chain(server, agent)]
-        (records if source_name == 'gumelfmodule.c' else thumb_records).append(row)
+        {'gumelfmodule.c': records, 'gumthumbrelocator.c': thumb_records,
+         'gummemory.c': readable_records, 'gumprocess-linux.c': maps_records,
+         'gumandroid.c': linker_records}[source_name].append(row)
     require(len(records) == 2 and {row['policy'] for row in records} == {'android-arm64', 'android-arm'},
             'exactly one actual ARM64 and ARM32 Gum compilation required')
     bind_thumb_compilation(records, thumb_records)
+    if readable_expected is not None:
+        bind_code_readable_compilation(records, readable_records)
+        bind_proc_maps_compilation(records, maps_records)
+        bind_linker_pattern_compilation(records, linker_records)
     deliveries = {}
     for kind in ('server', 'gadget'):
         record = manifest['artifacts'][kind]
@@ -365,6 +469,8 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
                 bind_embedded_agent(linked, embedded, rewritten, rewrite, canonical)
                 begin, extent = embedded['offset'], embedded['extent']
                 require(product[begin:begin + extent] == rewritten, 'delivered server Agent bytes differ from resource')
+                if linker_expected is not None and policy == 'android-arm64':
+                    verify_linker_pattern_literals(rewritten, linker_spellings)
                 bindings.append({'policy': policy, 'linked_sha256': linked['agent_sha256'],
                                  'rewrite_sidecar': str(sidecar.relative_to(ROOT)),
                                  'resource': str(asset.relative_to(ROOT)), 'embedded_sha256': sha(rewritten)})
@@ -383,7 +489,13 @@ def audit(source, build, version, profile, config_path, manifest_path, output):
               'version': version, 'profile': profile, 'github_commit': __import__('os').environ.get('GITHUB_SHA'),
               'github_run_id': __import__('os').environ.get('GITHUB_RUN_ID'), 'gum_sha256': sha(expected),
               'compilations': records, 'thumb_relocator_sha256': sha(thumb_expected),
-              'thumb_relocator_compilations': thumb_records, 'products': deliveries,
+              'thumb_relocator_compilations': thumb_records,
+              'code_readability_sha256': sha(readable_expected) if readable_expected is not None else None,
+              'code_readability_compilations': readable_records,
+              'proc_maps_reader_sha256': sha(maps_expected) if maps_expected is not None else None,
+              'proc_maps_reader_compilations': maps_records,
+              'linker_pattern_sha256': sha(linker_expected) if linker_expected is not None else None,
+              'linker_pattern_compilations': linker_records, 'products': deliveries,
               'inputs': {path.relative_to(ROOT).as_posix(): value for path, value in sorted(inputs.records.items())},
               'evidence': {'file': archive.name, 'sha256': file_sha(archive), 'size': archive.stat().st_size},
               'android_runtime_tested': False,

@@ -26,6 +26,9 @@ EXTRA_FILES = {
 EXTRA_GUM_FILES = {
     '16.7.19': {
         'gum/gum.c': '7cb75dacbe8fe3402a1675ac1828a472c84b4fc19f9ab83e0fec4a8ad674434c',
+        'gum/gummemory.c': 'b04af3b6b0fd39cceb085f4c5934dc116059cc03509de3fd3eb72a047af111f8',
+        'gum/backend-linux/gumprocess-linux.c': '7a9f4120eb724d2611a558ddd91db9dabc69e3c82c2ee937111291ce7ac0e935',
+        'gum/backend-linux/gumandroid.c': '4a48a4b32cd93335440cc5c05e01ee93ea877b15ab5da0e7ee04d783a8f81dcd',
         'gum/gumelfmodule.c': '12b93b344b68b9f641f69252c1415d15543a9bdcdc557d094912dcb269b3983a',
         'gum/arch-arm/gumthumbrelocator.c': '52db2f355ddf39e347c79b8b5322cc64e9bc6a94d2564be102b3fefa8ea6da09',
     },
@@ -274,6 +277,37 @@ frida_on_load (void)
             elif relative.endswith('lib/payload/portal-client.vala'):
                 changes = [edit('"Emulated realm is not supported by frida-gadget"',
                                 '"Emulated realm is not supported by nianchu-gadget"')]
+            elif relative == 'subprojects/frida-gum/gum/backend-linux/gumandroid.c' and version == '16.7.19':
+                # GLib's hex parser accepts either case. Preserve pattern bytes,
+                # wildcard masks and displacement; change only the literal spelling.
+                changes = [
+                    edit('"f4 4f 04 a9 "', '"F4 4f 04 a9 "'),
+                    edit('"f3 03 02 aa "', '"F3 03 02 aa "'),
+                    edit('"fd c3 00 91 "', '"Fd c3 00 91 "'),
+                ]
+            elif relative == 'subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c' and version == '16.7.19':
+                changes = [edit('''  if (need_refill)
+  {
+    guint offset;
+''', '''  /* A successful read may contain only part of a maps line. Refill until
+   * a newline is present; EOF, errors and an oversized line return FALSE. */
+  while (need_refill && next_newline == NULL)
+  {
+    guint offset;
+''')]
+            elif relative == 'subprojects/frida-gum/gum/gummemory.c' and version == '16.7.19':
+                changes = [edit('''      if (gum_try_mprotect ((gpointer) cur_page, page_size, GUM_PAGE_RWX))
+        g_hash_table_add (gum_softened_code_pages, (gpointer) cur_page);
+''', '''      GumPageProtection protection;
+
+      /* Reading execute-only code must not add write access. Query failure
+       * leaves the mapping untouched; failed transitions are not cached. */
+      if (gum_memory_query_protection (cur_page, &protection) &&
+          ((protection & GUM_PAGE_READ) != 0 ||
+           gum_try_mprotect ((gpointer) cur_page, page_size,
+               protection | GUM_PAGE_READ)))
+        g_hash_table_add (gum_softened_code_pages, (gpointer) cur_page);
+''')]
             elif relative == 'subprojects/frida-gum/gum/gumelfmodule.c':
                 old = '''      GMappedFile * file;
       gconstpointer data;

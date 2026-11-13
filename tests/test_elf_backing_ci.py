@@ -121,6 +121,76 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ELF backing compilation required'):
             audit.bind_thumb_compilation(records[:1], thumbs)
 
+    def test_code_readability_requires_both_architectures_same_agent(self):
+        records = [{'policy': 'android-arm64', 'agent_sha256': 'a' * 64},
+                   {'policy': 'android-arm', 'agent_sha256': 'b' * 64}]
+        audit.bind_code_readable_compilation(records, list(reversed(records)))
+        for invalid in ([], records[:1], [records[0], records[0]],
+                        [{**records[0], 'policy': 'host'}, records[1]]):
+            with self.assertRaisesRegex(ValueError, 'code readability compilation required'):
+                audit.bind_code_readable_compilation(records, invalid)
+        for index in (0, 1):
+            mismatch = [dict(row) for row in records]
+            mismatch[index]['agent_sha256'] = 'c' * 64
+            with self.assertRaisesRegex(ValueError, 'same Agent for ' + records[index]['policy']):
+                audit.bind_code_readable_compilation(records, mismatch)
+        with self.assertRaisesRegex(ValueError, 'ELF backing compilation required'):
+            audit.bind_code_readable_compilation(records[:1], records)
+
+    def test_proc_maps_reader_requires_both_architectures_same_agent(self):
+        records = [{'policy': 'android-arm64', 'agent_sha256': 'a' * 64},
+                   {'policy': 'android-arm', 'agent_sha256': 'b' * 64}]
+        audit.bind_proc_maps_compilation(records, list(reversed(records)))
+        for invalid in ([], records[:1], [records[0], records[0]],
+                        [{**records[0], 'policy': 'host'}, records[1]]):
+            with self.assertRaisesRegex(ValueError, 'maps reader compilation required'):
+                audit.bind_proc_maps_compilation(records, invalid)
+        for index in (0, 1):
+            mismatch = [dict(row) for row in records]
+            mismatch[index]['agent_sha256'] = 'c' * 64
+            with self.assertRaisesRegex(ValueError, 'same Agent for ' + records[index]['policy']):
+                audit.bind_proc_maps_compilation(records, mismatch)
+        with self.assertRaisesRegex(ValueError, 'ELF backing compilation required'):
+            audit.bind_proc_maps_compilation(records[:1], records)
+
+    def test_linker_patterns_require_both_architectures_same_agent(self):
+        records = [{'policy': 'android-arm64', 'agent_sha256': 'a' * 64},
+                   {'policy': 'android-arm', 'agent_sha256': 'b' * 64}]
+        audit.bind_linker_pattern_compilation(records, list(reversed(records)))
+        for invalid in ([], records[:1], [records[0], records[0]],
+                        [{**records[0], 'policy': 'host'}, records[1]]):
+            with self.assertRaisesRegex(ValueError, 'linker pattern compilation required'):
+                audit.bind_linker_pattern_compilation(records, invalid)
+        for index in (0, 1):
+            mismatch = [dict(row) for row in records]
+            mismatch[index]['agent_sha256'] = 'c' * 64
+            with self.assertRaisesRegex(ValueError, 'same Agent for ' + records[index]['policy']):
+                audit.bind_linker_pattern_compilation(records, mismatch)
+        with self.assertRaisesRegex(ValueError, 'ELF backing compilation required'):
+            audit.bind_linker_pattern_compilation(records[:1], records)
+
+    def test_linker_patterns_reject_stale_literals_in_final_agent(self):
+        import json
+        spec = json.loads((ROOT / 'patches/16.7.19/spec.json').read_text())
+        relative = 'subprojects/frida-gum/gum/backend-linux/gumandroid.c'
+        entry = next(row for row in spec['files'] if row['path'] == relative)
+        raw = (ROOT / 'tests/fixtures/16.7.19' / relative).read_bytes()
+        loader = importlib.util.spec_from_file_location('linker_patch_audit', ROOT / 'scripts/apply_patches.py')
+        patch = importlib.util.module_from_spec(loader)
+        loader.loader.exec_module(patch)
+        spellings = audit.linker_pattern_spellings(patch.transform(raw, entry['edits']))
+        self.assertEqual(len(spellings), 3)
+        data = b'prefix\0' + b'\0'.join(text.strip().encode('ascii') for text in spellings) + b'\0'
+        rows = audit.verify_linker_pattern_literals(data, spellings)
+        self.assertTrue(all(row['old_count'] == 0 and row['new_count'] == 1 for row in rows))
+        with self.assertRaisesRegex(ValueError, 'literal absent'):
+            audit.verify_linker_pattern_literals(b'unrelated', spellings)
+        for text in spellings:
+            stale = text.strip().encode('ascii')
+            stale = stale[:1].lower() + stale[1:]
+            with self.assertRaisesRegex(ValueError, 'old linker pattern literal remains'):
+                audit.verify_linker_pattern_literals(data + stale, spellings)
+
     def test_workflow_audits_each_profile_before_next_mutation_or_upload(self):
         text = (ROOT / '.github/workflows/build.yml').read_text(encoding='utf-8')
         compatible = text.index('- name: Audit compatible ELF backing consumption')
